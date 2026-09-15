@@ -26,14 +26,17 @@ if [ -z "$SOURCES" ] || [ -z "$OUTPUT" ]; then
     exit 2
 fi
 
-# The two GUI bundles and CLI archive reuse one prepared dependency graph.
-# Keep the coupled macOS release explicit instead of silently adding products.
+# The two GUI bundles and CLI archive reuse one prepared dependency graph,
+# so macOS always builds the coupled trio; additional products (all-logic)
+# join on top of it.
+expanded=0
 for required in pulseview slogicview sigrok-cli; do
     case ",$PRODUCTS," in
         *,$required,*) ;;
-        *) echo "macos-arm64 currently packages pulseview, slogicview and sigrok-cli together" >&2; exit 2 ;;
+        *) PRODUCTS="$PRODUCTS,$required"; expanded=1 ;;
     esac
 done
+[ "$expanded" -eq 0 ] || echo "macos-arm64 packages pulseview, slogicview and sigrok-cli together; building: $PRODUCTS"
 
 [ "$(uname -s)" = Darwin ] || { echo "macos-arm64 must be built on macOS" >&2; exit 2; }
 [ "$(uname -m)" = arm64 ] || { echo "macos-arm64 requires an Apple Silicon host" >&2; exit 2; }

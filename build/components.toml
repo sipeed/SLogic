@@ -32,10 +32,10 @@ dependencies = ["libsigrok", "libsigrokdecode"]
 targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
 
 # Multi-vendor DSView fork; self-contained (bundles its own libsigrok4DSL
-# and libsigrokdecode4DSL). macOS support pending: the 15.0 dependency
-# prefix lacks fftw.
+# and libsigrokdecode4DSL). Not in any target's default_products yet: build
+# it explicitly with --product all-logic.
 [all-logic]
 kind = "product"
 source = "all-logic"
 dependencies = []
-targets = ["linux-x86_64-musl", "windows-x86_64-ucrt"]
+targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]

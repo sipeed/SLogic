@@ -52,10 +52,14 @@ mkdir -p "$DIST_DIR/share"
 # Copy the Release executable plus our built libraries.
 cp "sr-win32/bin/$BINARY_NAME.exe" "$DIST_DIR/"
 if [ "$PRODUCT" = all-logic ]; then
-    # ALL LOGIC bundles its own libsigrok4DSL stack and DSView resources.
+    # ALL LOGIC bundles its own libsigrok4DSL stack. On Windows
+    # GetAppDataDir() is the executable directory, so DSView resources
+    # (res/, lang/, demo/) sit next to the exe and protocol decoders in
+    # ./decoders (see DSView/pv/config/appconfig.cpp).
     cp sr-win32/bin/libsigrok4DSL*.dll "$DIST_DIR/" 2>/dev/null || true
     cp sr-win32/bin/libsigrokdecode4DSL*.dll "$DIST_DIR/" 2>/dev/null || true
-    cp -r sr-win32/share/DSView "$DIST_DIR/share/" 2>/dev/null || true
+    cp -r sr-win32/share/DSView/. "$DIST_DIR/"
+    cp -r sr-win32/share/libsigrokdecode4DSL/decoders "$DIST_DIR/decoders"
 else
     cp sr-win32/bin/libsigrok-4.dll "$DIST_DIR/"
     cp sr-win32/bin/libsigrokcxx-4.dll "$DIST_DIR/" 2>/dev/null || true

@@ -55,12 +55,19 @@ fi
 mkdir -p "$BUILD_ROOT"
 STAMP_DIR="$BUILD_ROOT/.slogic-state"
 mkdir -p "$STAMP_DIR"
+
+has_product() {
+    case ",$PRODUCTS," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+
 logic_key="${SLOGIC_BUILD_LOGIC_KEY:-unknown}"
 if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "$logic_key" ]; then
     echo "Build logic changed; invalidating macOS target workspace."
     rm -rf "$BUILD_ROOT/build-darwin" "$BUILD_ROOT/sr-darwin"
 fi
-for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli; do
+projects=(libsigrok libsigrokdecode pulseview slogicview sigrok-cli)
+has_product all-logic && projects+=(all-logic)
+for project in "${projects[@]}"; do
     revision=$(git -C "$SOURCES/$project" rev-parse HEAD)
     if [ ! -f "$STAMP_DIR/$project" ] || [ "$(cat "$STAMP_DIR/$project")" != "$revision" ]; then
         case "$project" in
@@ -73,11 +80,14 @@ done
 cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
 
 cd "$BUILD_ROOT"
+make_targets=(install)
+has_product all-logic && make_targets+=(install-all-logic)
 make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
     RELEASE_VERSION="$RELEASE_VERSION" \
     LIBSIGROKDECODE_CONFIGURE_OPTS="--enable-shared --disable-static" \
     PULSEVIEW_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET -DCMAKE_PREFIX_PATH=$QT_PREFIX -DBoost_USE_STATIC_LIBS=OFF -DSTATIC_PKGDEPS_LIBS=OFF" \
-    install
+    ALL_LOGIC_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET -DCMAKE_PREFIX_PATH=$QT_PREFIX" \
+    "${make_targets[@]}"
 
 mkdir -p "$OUTPUT"
 
@@ -232,6 +242,8 @@ clang -mmacosx-version-min="$MACOS_DEPLOYMENT_TARGET" -Os \
 # Complete the dependency closure for every Mach-O in the bundle, including
 # Python extension modules. macdeployqt only handles Qt's direct dependency
 # graph and otherwise leaves Homebrew paths in Python and image plugins.
+close_bundle_dependencies() {
+    local CONTENTS=$1
 for pass in 1 2 3 4 5 6 7 8; do
     copied=0
     while IFS= read -r -d '' binary; do
@@ -403,9 +415,12 @@ while IFS= read -r -d '' binary; do
         count=$((count - 1))
     done
 done < <(find "$CONTENTS" -type f -print0)
+}
 
 # Info.plist does not control binary compatibility. Refuse to publish a bundle
 # containing a Mach-O built for a newer macOS than the advertised minimum.
+verify_deployment_target() {
+    local CONTENTS=$1
 deployment_mismatch=0
 while IFS= read -r -d '' binary; do
     file "$binary" | grep -q Mach-O || continue
@@ -420,6 +435,10 @@ while IFS= read -r -d '' binary; do
          found && ($1=="minos" || $1=="version") { print $2; found=0 }')
 done < <(find "$CONTENTS" -type f -print0)
 [ "$deployment_mismatch" -eq 0 ] || exit 1
+}
+
+close_bundle_dependencies "$CONTENTS"
+verify_deployment_target "$CONTENTS"
 
 SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 
@@ -554,6 +573,87 @@ if [ -n "${MACOS_NOTARY_PROFILE:-}" ] && [ "$SIGN_IDENTITY" != - ]; then
         --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
 fi
 
+# ALL LOGIC: an independent application bundle. Resources live at
+# Contents/share/ because GetAppDataDir() resolves applicationDirPath
+# followed by ../share/DSView, and protocol decoders at
+# ../share/libsigrokdecode4DSL/decoders (DSView/pv/config/appconfig.cpp).
+if has_product all-logic; then
+    AL_APP="$BUILD_ROOT/AllLogic.app"
+    AL_CONTENTS="$AL_APP/Contents"
+    rm -rf "$AL_APP"
+    mkdir -p "$AL_CONTENTS/MacOS" "$AL_CONTENTS/Frameworks" \
+        "$AL_CONTENTS/Resources" "$AL_CONTENTS/share/libsigrokdecode4DSL"
+    cp sr-darwin/bin/AllLogic "$AL_CONTENTS/MacOS/AllLogic-bin"
+    cp -a sr-darwin/share/DSView "$AL_CONTENTS/share/"
+    cp -a sr-darwin/share/libsigrokdecode4DSL/decoders \
+        "$AL_CONTENTS/share/libsigrokdecode4DSL/"
+
+    cat > "$AL_CONTENTS/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>ALL LOGIC</string>
+  <key>CFBundleExecutable</key><string>AllLogic-bin</string>
+  <key>CFBundleIdentifier</key><string>com.sipeed.alllogic</string>
+  <key>CFBundleIconFile</key><string>AllLogic.icns</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>AllLogic</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$RELEASE_VERSION</string>
+  <key>CFBundleVersion</key><string>$RELEASE_VERSION</string>
+  <key>LSMinimumSystemVersion</key><string>$MACOS_DEPLOYMENT_TARGET</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+EOF
+
+    AL_ICONSET="$BUILD_ROOT/AllLogic.iconset"
+    rm -rf "$AL_ICONSET"
+    mkdir -p "$AL_ICONSET"
+    AL_ICON_MASTER="$BUILD_ROOT/AllLogic-1024.png"
+    sips -z 1024 1024 -s format png \
+        "sr-darwin/share/DSView/logo.svg" \
+        --out "$AL_ICON_MASTER" >/dev/null
+    for size in 16 32 128 256 512; do
+        double=$((size * 2))
+        sips -z "$size" "$size" "$AL_ICON_MASTER" \
+            --out "$AL_ICONSET/icon_${size}x${size}.png" >/dev/null
+        sips -z "$double" "$double" "$AL_ICON_MASTER" \
+            --out "$AL_ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$AL_ICONSET" -o "$AL_CONTENTS/Resources/AllLogic.icns"
+
+    dylibbundler -od -of -b -ns -x "$AL_CONTENTS/MacOS/AllLogic-bin" \
+        -d "$AL_CONTENTS/Frameworks" -p @executable_path/../Frameworks \
+        -s "$BUILD_ROOT/sr-darwin/lib" -s "${BUILD_PREFIX:-/opt/homebrew}/lib"
+    macdeployqt "$AL_APP" -always-overwrite
+
+    if [ -n "$BUILD_PREFIX" ]; then
+        cp -L "$BUILD_PREFIX/lib/libpython$PYTHON_VERSION.dylib" "$AL_CONTENTS/Frameworks/"
+        mkdir -p "$AL_CONTENTS/Resources/PythonRuntime/lib"
+        rsync -a --exclude='__pycache__' --exclude='test' --exclude='tests' \
+            "$BUILD_PREFIX/lib/python$PYTHON_VERSION" "$AL_CONTENTS/Resources/PythonRuntime/lib/"
+        AL_PYTHON_HOME_REL="../Resources/PythonRuntime"
+    else
+        PYTHON_FRAMEWORK="$(brew --prefix python@3.14)/Frameworks/Python.framework"
+        ditto "$PYTHON_FRAMEWORK" "$AL_CONTENTS/Frameworks/Python.framework"
+        find "$AL_CONTENTS/Frameworks/Python.framework" -type f \( -name '*.py' -o -name '*.pyc' \) -exec chmod a-x {} +
+        AL_PYTHON_HOME_REL="../Frameworks/Python.framework/Versions/$PYTHON_VERSION"
+    fi
+
+    clang -mmacosx-version-min="$MACOS_DEPLOYMENT_TARGET" -Os \
+        -DGUI_BINARY='"AllLogic-bin"' -DPYTHON_HOME_REL="\"$AL_PYTHON_HOME_REL\"" \
+        "$BUILD_ROOT/gui-launcher.c" -o "$AL_CONTENTS/MacOS/AllLogic"
+    /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable AllLogic' "$AL_CONTENTS/Info.plist"
+
+    close_bundle_dependencies "$AL_CONTENTS"
+    verify_deployment_target "$AL_CONTENTS"
+
+    package_gui_dmg "$AL_APP" AllLogic AllLogic "ALL LOGIC" \
+        AllLogic-macos-arm64.dmg
+    ls -lh "$OUTPUT/AllLogic-macos-arm64.dmg"
+fi
+
 file "$CONTENTS/MacOS/pulseview-bin" "$SV_CONTENTS/MacOS/slogicview-bin" \
     "$OUTPUT/PulseView-SLogic-macos-arm64.dmg" \
     "$OUTPUT/SLogicView-SLogic-macos-arm64.dmg" \
@@ -564,6 +664,6 @@ ls -lh "$OUTPUT/PulseView-SLogic-macos-arm64.dmg" \
     "$OUTPUT/SLogicView-SLogic-macos-arm64.dmg" \
     "$OUTPUT/sigrok-cli-SLogic-macos-arm64.zip"
 printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
-for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli; do
+for project in "${projects[@]}"; do
     git -C "$SOURCES/$project" rev-parse HEAD > "$STAMP_DIR/$project"
 done
