@@ -1,0 +1,5 @@
+/artifact/
+/work/
+/.pvs
+__pycache__/
+*.py[cod]
