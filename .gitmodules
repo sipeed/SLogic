@@ -18,3 +18,7 @@
 	path = sources/sigrok-cli
 	url = https://github.com/sigrokproject/sigrok-cli.git
 	branch = master
+[submodule "all-logic"]
+	path = sources/all-logic
+	url = https://github.com/sipeed/ALL-LOGIC.git
+	branch = main

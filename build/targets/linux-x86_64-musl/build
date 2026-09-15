@@ -34,12 +34,13 @@ for project in libsigrok libsigrokdecode; do
 done
 IFS=, read -r -a product_list <<<"$PRODUCTS"
 for product in "${product_list[@]}"; do
-    case "$product" in pulseview|slogicview|sigrok-cli) ;; *) echo "Unsupported Linux product: $product" >&2; exit 2 ;; esac
+    case "$product" in pulseview|slogicview|sigrok-cli|all-logic) ;; *) echo "Unsupported Linux product: $product" >&2; exit 2 ;; esac
     test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
 done
 case ",$PRODUCTS," in *,pulseview,*) ;; *) rm -f "$OUTPUT/PulseView-SLogic-linux-x86_64-musl.AppImage" ;; esac
 case ",$PRODUCTS," in *,slogicview,*) ;; *) rm -f "$OUTPUT/SLogicView-SLogic-linux-x86_64-musl.AppImage" ;; esac
 case ",$PRODUCTS," in *,sigrok-cli,*) ;; *) rm -f "$OUTPUT/sigrok-cli-SLogic-linux-x86_64-musl.AppImage" ;; esac
+case ",$PRODUCTS," in *,all-logic,*) ;; *) rm -f "$OUTPUT/AllLogic-linux-x86_64-musl.AppImage" ;; esac
 
 RUNTIME="$CACHE/downloads/runtime-x86_64"
 mkdir -p "$CACHE/downloads" "$CACHE/ccache/linux-x86_64-musl" "$OUTPUT" "$(dirname "$OUT")"
@@ -70,7 +71,7 @@ fi
 # Source git state is resolved on the host: submodule gitdirs live in the
 # superproject and are not visible inside the container.
 source_env=()
-for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli; do
+for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli all-logic; do
     variable="SOURCE_${project^^}_STATE"
     variable=${variable//-/_}
     state=""

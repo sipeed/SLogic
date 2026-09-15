@@ -22,7 +22,8 @@ workspace_invalidated=0
 if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "$logic_key" ]; then
     echo "Build logic changed; invalidating target workspace."
     rm -rf "$BUILD_DIR/build" "$BUILD_DIR/sr" "$BUILD_DIR/AppDir-pulseview" \
-        "$BUILD_DIR/AppDir-slogicview" "$BUILD_DIR/AppDir-sigrok-cli"
+        "$BUILD_DIR/AppDir-slogicview" "$BUILD_DIR/AppDir-sigrok-cli" \
+        "$BUILD_DIR/AppDir-all-logic"
     workspace_invalidated=1
 fi
 
@@ -52,12 +53,13 @@ done
 if [ "$shared_nuke" -eq 1 ]; then
     echo "Shared sigrok dependency changed; invalidating dependent work."
     rm -rf "$BUILD_DIR/build" "$BUILD_DIR/sr" "$BUILD_DIR/AppDir-pulseview" \
-        "$BUILD_DIR/AppDir-slogicview" "$BUILD_DIR/AppDir-sigrok-cli"
+        "$BUILD_DIR/AppDir-slogicview" "$BUILD_DIR/AppDir-sigrok-cli" \
+        "$BUILD_DIR/AppDir-all-logic"
     shared_build=1
 elif [ "$shared_build" -eq 1 ]; then
     echo "Shared sigrok dependency state changed; rebuilding incrementally."
 fi
-for product in pulseview slogicview sigrok-cli; do
+for product in pulseview slogicview sigrok-cli all-logic; do
     has_product "$product" || continue
     state=$(state_of "$product")
     source_state[$product]=$state
@@ -86,6 +88,7 @@ projects=(libsigrok libsigrokdecode)
 has_product pulseview && projects+=(pulseview)
 has_product slogicview && projects+=(slogicview)
 has_product sigrok-cli && projects+=(sigrok-cli)
+has_product all-logic && projects+=(all-logic)
 for project in "${projects[@]}"; do
     rsync -a --delete --exclude='.git' "$SOURCE_DIR/$project/" "$BUILD_DIR/$project/"
 done
@@ -103,7 +106,7 @@ else
 fi
 
 build_targets=()
-for product in pulseview slogicview sigrok-cli; do
+for product in pulseview slogicview sigrok-cli all-logic; do
     has_product "$product" && [ "${product_build[$product]}" -eq 1 ] && build_targets+=("install-$product")
 done
 if [ "${#build_targets[@]}" -gt 0 ]; then
@@ -209,12 +212,15 @@ make_appimage() {
 PULSEVIEW_OUTPUT="$OUTPUT_DIR/PulseView-SLogic-linux-x86_64-musl.AppImage"
 SLOGICVIEW_OUTPUT="$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64-musl.AppImage"
 SIGROK_CLI_OUTPUT="$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64-musl.AppImage"
+ALL_LOGIC_OUTPUT="$OUTPUT_DIR/AllLogic-linux-x86_64-musl.AppImage"
 pulseview_package=0
 slogicview_package=0
 sigrok_cli_package=0
+all_logic_package=0
 has_product pulseview && { [ "${product_build[pulseview]}" -eq 1 ] || [ ! -s "$PULSEVIEW_OUTPUT" ]; } && pulseview_package=1
 has_product slogicview && { [ "${product_build[slogicview]}" -eq 1 ] || [ ! -s "$SLOGICVIEW_OUTPUT" ]; } && slogicview_package=1
 has_product sigrok-cli && { [ "${product_build[sigrok-cli]}" -eq 1 ] || [ ! -s "$SIGROK_CLI_OUTPUT" ]; } && sigrok_cli_package=1
+has_product all-logic && { [ "${product_build[all-logic]}" -eq 1 ] || [ ! -s "$ALL_LOGIC_OUTPUT" ]; } && all_logic_package=1
 
 create_gui_appdir() {
     local appdir=$1 executable=$2 desktop=$3 icon=$4 label=$5
@@ -252,10 +258,13 @@ create_gui_appdir() {
 
 PV_APPDIR=AppDir-pulseview
 SV_APPDIR=AppDir-slogicview
+AL_APPDIR=AppDir-all-logic
 [ "$pulseview_package" -eq 0 ] || create_gui_appdir \
     "$PV_APPDIR" pulseview org.sigrok.PulseView.desktop pulseview.svg PulseView
 [ "$slogicview_package" -eq 0 ] || create_gui_appdir \
     "$SV_APPDIR" slogicview com.sipeed.SLogicView.desktop slogicview.svg SLogicView
+[ "$all_logic_package" -eq 0 ] || create_gui_appdir \
+    "$AL_APPDIR" AllLogic dsview.desktop dsview.svg "ALL LOGIC"
 
 if [ "$sigrok_cli_package" -eq 1 ]; then
 echo "[4/5] Creating sigrok-cli musl AppDir..."
@@ -287,10 +296,15 @@ if [ "$sigrok_cli_package" -eq 1 ]; then
     rm -f "$SIGROK_CLI_OUTPUT"
     make_appimage "$CLI_APPDIR" "$SIGROK_CLI_OUTPUT"
 fi
+if [ "$all_logic_package" -eq 1 ]; then
+    rm -f "$ALL_LOGIC_OUTPUT"
+    make_appimage "$AL_APPDIR" "$ALL_LOGIC_OUTPUT"
+fi
 artifacts=()
 has_product pulseview && artifacts+=("$OUTPUT_DIR/PulseView-SLogic-linux-x86_64-musl.AppImage")
 has_product slogicview && artifacts+=("$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64-musl.AppImage")
 has_product sigrok-cli && artifacts+=("$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64-musl.AppImage")
+has_product all-logic && artifacts+=("$OUTPUT_DIR/AllLogic-linux-x86_64-musl.AppImage")
 file "${artifacts[@]}"
 ls -lh "${artifacts[@]}"
 

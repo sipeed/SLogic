@@ -29,6 +29,7 @@ RUN apk add --no-cache \
     qt6-qtsvg-dev \
     qt6-qttools-dev \
     boost-dev \
+    fftw-dev \
     pax-utils \
     py3-elftools \
     patchelf \

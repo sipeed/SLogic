@@ -66,6 +66,7 @@ LIBSIGROKDECODE_DIR = $(BUILD_DIR)/libsigrokdecode
 PULSEVIEW_DIR = $(BUILD_DIR)/pulseview
 SLOGICVIEW_DIR = $(BUILD_DIR)/slogicview
 SIGROK_CLI_DIR = $(BUILD_DIR)/sigrok-cli
+ALL_LOGIC_DIR = $(BUILD_DIR)/all-logic
 
 LIBSIGROK_BUILD_SYSTEM = autotools
 LIBSIGROK_CONFIGURE_OPTS = --disable-all-drivers --enable-sipeed-slogic-analyzer --disable-bindings --enable-cxx --enable-static --enable-shared
@@ -83,6 +84,9 @@ SIGROK_CLI_BUILD_SYSTEM = autotools
 # libsigrokdecode 为静态库，用 --static 让 pkg-config 展开其私有依赖 (python 等)，
 # 否则最终链接缺少 Py* 符号。该方式不污染 configure 的编译器自检 (不进 LIBS)。
 SIGROK_CLI_CONFIGURE_OPTS = PKG_CONFIG="pkg-config --static"
+# ALL LOGIC (DSView fork) 自带 libsigrok4DSL/libsigrokdecode4DSL，不依赖上面的 sigrok 组件
+ALL_LOGIC_BUILD_SYSTEM = cmake
+ALL_LOGIC_CONFIGURE_OPTS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 
 # 通用的构建模板
 define CONFIGURE_TEMPLATE
@@ -162,6 +166,12 @@ $(SLOGICVIEW_DIR): slogicview/CMakeLists.txt
 	@echo "[slogicview] Syncing source code..."
 	@mkdir -p $(BUILD_DIR)
 	@$(RSYNC) slogicview/ $(SLOGICVIEW_DIR)/
+
+# ALL LOGIC source synchronization
+$(ALL_LOGIC_DIR): all-logic/CMakeLists.txt
+	@echo "[all-logic] Syncing source code..."
+	@mkdir -p $(BUILD_DIR)
+	@$(RSYNC) all-logic/ $(ALL_LOGIC_DIR)/
 
 # sigrok-cli 源码同步和autogen
 $(SIGROK_CLI_DIR)/configure: sigrok-cli/configure.ac sigrok-cli/Makefile.am
@@ -285,6 +295,29 @@ update-sigrok-cli:
 
 clean-sigrok-cli:
 	$(call CLEAN_TEMPLATE,sigrok-cli,$(SIGROK_CLI_BUILD_SYSTEM),$(SIGROK_CLI_DIR))
+
+# ==============================================
+# ALL LOGIC 目标 (自带 sigrok 栈，不依赖共享前缀组件)
+# ==============================================
+configure-all-logic: $(ALL_LOGIC_DIR)/build/CMakeCache.txt
+
+$(ALL_LOGIC_DIR)/build/CMakeCache.txt: $(ALL_LOGIC_DIR) $(TOOLCHAIN_STAMP)
+	$(call CONFIGURE_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR),$(ALL_LOGIC_CONFIGURE_OPTS))
+
+build-all-logic: configure-all-logic
+	$(call BUILD_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR))
+
+install-all-logic: build-all-logic
+	$(call INSTALL_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR))
+
+update-all-logic:
+	@echo "[all-logic] Syncing source code..."
+	@$(RSYNC) all-logic/ $(ALL_LOGIC_DIR)/
+	$(call BUILD_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR))
+	$(call INSTALL_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR))
+
+clean-all-logic:
+	$(call CLEAN_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR))
 
 # ==============================================
 # 全局目标
