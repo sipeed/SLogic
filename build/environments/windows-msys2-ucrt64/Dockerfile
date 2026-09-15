@@ -30,6 +30,7 @@ RUN /usr/bin/msys2 -c "pacman -S --noconfirm --needed \
         mingw-w64-ucrt-x86_64-hidapi \
         mingw-w64-ucrt-x86_64-nettle \
         mingw-w64-ucrt-x86_64-boost \
+        mingw-w64-ucrt-x86_64-fftw \
         mingw-w64-ucrt-x86_64-qt6-base \
         mingw-w64-ucrt-x86_64-qt6-svg \
         mingw-w64-ucrt-x86_64-qt6-tools \

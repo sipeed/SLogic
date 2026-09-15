@@ -35,12 +35,13 @@ for project in libsigrok libsigrokdecode; do
 done
 IFS=, read -r -a product_list <<<"$PRODUCTS"
 for product in "${product_list[@]}"; do
-    case "$product" in pulseview|slogicview|sigrok-cli) ;; *) echo "Unsupported Windows product: $product" >&2; exit 2 ;; esac
+    case "$product" in pulseview|slogicview|sigrok-cli|all-logic) ;; *) echo "Unsupported Windows product: $product" >&2; exit 2 ;; esac
     test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
 done
 case ",$PRODUCTS," in *,pulseview,*) ;; *) rm -f "$OUTPUT/PulseView-SLogic-windows-x86_64-ucrt.exe" ;; esac
 case ",$PRODUCTS," in *,slogicview,*) ;; *) rm -f "$OUTPUT/SLogicView-SLogic-windows-x86_64-ucrt.exe" ;; esac
 case ",$PRODUCTS," in *,sigrok-cli,*) ;; *) rm -f "$OUTPUT/sigrok-cli-SLogic-windows-x86_64-ucrt.exe" ;; esac
+case ",$PRODUCTS," in *,all-logic,*) ;; *) rm -f "$OUTPUT/AllLogic-windows-x86_64-ucrt.exe" ;; esac
 
 AVAILABLE_GB=$(df --output=avail -BG "$BUILD_HOME" | tail -1 | tr -dc '0-9')
 if [ -z "$AVAILABLE_GB" ] || [ "$AVAILABLE_GB" -lt "${MIN_FREE_GB:-20}" ]; then
@@ -67,7 +68,7 @@ fi
 # superproject and are not visible inside the container. A trailing -dirty
 # marks uncommitted changes so the container rebuilds incrementally.
 source_env=()
-for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli; do
+for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli all-logic; do
     variable="SOURCE_${project^^}_STATE"
     variable=${variable//-/_}
     state=""

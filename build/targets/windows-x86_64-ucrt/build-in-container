@@ -26,6 +26,7 @@ if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "
     echo "Build logic changed; invalidating Windows target workspace."
     rm -rf "$BUILD_ROOT/build-win32" "$BUILD_ROOT/sr-win32" \
         "$BUILD_ROOT/PulseView-win64-portable" "$BUILD_ROOT/SLogicView-win64-portable" \
+        "$BUILD_ROOT/AllLogic-win64-portable" \
         "$BUILD_ROOT/sigrok-cli-portable"
     workspace_invalidated=1
 fi
@@ -42,6 +43,7 @@ if [ "${shared_stamp//-dirty/}" != "${shared_state//-dirty/}" ]; then
     echo "Shared sigrok dependency changed; invalidating Windows products."
     rm -rf "$BUILD_ROOT/build-win32" "$BUILD_ROOT/sr-win32" \
         "$BUILD_ROOT/PulseView-win64-portable" "$BUILD_ROOT/SLogicView-win64-portable" \
+        "$BUILD_ROOT/AllLogic-win64-portable" \
         "$BUILD_ROOT/sigrok-cli-portable"
     shared_build=1
 elif [ "$shared_stamp" != "$shared_state" ] || [[ "$shared_state" == *-dirty* ]]; then
@@ -49,7 +51,7 @@ elif [ "$shared_stamp" != "$shared_state" ] || [[ "$shared_state" == *-dirty* ]]
     shared_build=1
 fi
 declare -A product_build product_state
-for product in pulseview slogicview sigrok-cli; do
+for product in pulseview slogicview sigrok-cli all-logic; do
     has_product "$product" || continue
     variable="SOURCE_${product^^}_STATE"
     variable=${variable//-/_}
@@ -61,6 +63,7 @@ for product in pulseview slogicview sigrok-cli; do
     output_name="$product-SLogic-windows-x86_64-ucrt.exe"
     [ "$product" = pulseview ] && output_name="PulseView-SLogic-windows-x86_64-ucrt.exe"
     [ "$product" = slogicview ] && output_name="SLogicView-SLogic-windows-x86_64-ucrt.exe"
+    [ "$product" = all-logic ] && output_name="AllLogic-windows-x86_64-ucrt.exe"
     if [ "${stamp//-dirty/}" != "${state//-dirty/}" ]; then
         product_build[$product]=1
         rm -rf "$BUILD_ROOT/build-win32/$product" "$BUILD_ROOT/$product-portable" \
@@ -75,6 +78,7 @@ projects=(libsigrok libsigrokdecode)
 has_product pulseview && projects+=(pulseview)
 has_product slogicview && projects+=(slogicview)
 has_product sigrok-cli && projects+=(sigrok-cli)
+has_product all-logic && projects+=(all-logic)
 for project in "${projects[@]}"; do
     rsync -a --delete --exclude=.git --exclude=build \
         "$SOURCE_ROOT/$project/" "$BUILD_ROOT/$project/"
@@ -96,6 +100,7 @@ pids=()
 has_product pulseview && [ "${product_build[pulseview]}" -eq 1 ] && product_count=$((product_count + 1))
 has_product slogicview && [ "${product_build[slogicview]}" -eq 1 ] && product_count=$((product_count + 1))
 has_product sigrok-cli && [ "${product_build[sigrok-cli]}" -eq 1 ] && product_count=$((product_count + 1))
+has_product all-logic && [ "${product_build[all-logic]}" -eq 1 ] && product_count=$((product_count + 1))
 if [ "$product_count" -gt 0 ]; then
     product_jobs=$((JOBS / product_count))
     [ "$product_jobs" -ge 1 ] || product_jobs=1
@@ -117,13 +122,19 @@ if has_product sigrok-cli && [ "${product_build[sigrok-cli]}" -eq 1 ]; then
     BUILD_JOBS="$product_jobs" bash /c/target/build-cli-in-container &
     pids+=("$!")
 fi
+if has_product all-logic && [ "${product_build[all-logic]}" -eq 1 ]; then
+    PRODUCT=all-logic DISPLAY_NAME=AllLogic BINARY_NAME=AllLogic \
+        OUTPUT_NAME=AllLogic-windows-x86_64-ucrt.exe \
+        BUILD_JOBS="$product_jobs" bash /c/target/build-pulseview-in-container &
+    pids+=("$!")
+fi
 failed=0
 for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
 [ "$failed" -eq 0 ] || { echo "One or more Windows product builds failed" >&2; exit 1; }
 
 printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
 printf '%s\n' "$shared_state" > "$STAMP_DIR/shared"
-for product in pulseview slogicview sigrok-cli; do
+for product in pulseview slogicview sigrok-cli all-logic; do
     has_product "$product" || continue
     printf '%s\n' "${product_state[$product]}" > "$STAMP_DIR/$product"
 done

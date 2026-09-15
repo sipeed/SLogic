@@ -8,7 +8,7 @@ PRODUCT="${PRODUCT:-pulseview}"
 DISPLAY_NAME="${DISPLAY_NAME:-PulseView}"
 BINARY_NAME="${BINARY_NAME:-pulseview}"
 PORTABLE_NAME="${DISPLAY_NAME}-win64-portable"
-OUTPUT_NAME="${DISPLAY_NAME}-SLogic-windows-x86_64-ucrt.exe"
+OUTPUT_NAME="${OUTPUT_NAME:-${DISPLAY_NAME}-SLogic-windows-x86_64-ucrt.exe}"
 LAUNCHER_NAME="${DISPLAY_NAME}.exe"
 mkdir -p "$BUILD_DIR/tmp"
 export TMPDIR="$BUILD_DIR/tmp"
@@ -27,10 +27,11 @@ if [ ! -f "build-win32/$PRODUCT/build/CMakeCache.txt" ]; then
     rsync -a --delete --exclude=.git --exclude=build "$PRODUCT/" "build-win32/$PRODUCT/"
     cmake_args=(
         -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/sr-win32" \
-        -DCMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}" \
-        -DBoost_USE_STATIC_LIBS=OFF \
-        -DSTATIC_PKGDEPS_LIBS=OFF
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}"
     )
+    if [ "$PRODUCT" != all-logic ]; then
+        cmake_args+=(-DBoost_USE_STATIC_LIBS=OFF -DSTATIC_PKGDEPS_LIBS=OFF)
+    fi
     if [ "$PRODUCT" = slogicview ]; then
         cmake_args+=("-DSLOGICVIEW_VERSION=${RELEASE_VERSION:-0.0.0-dev}")
     fi
@@ -50,12 +51,19 @@ mkdir -p "$DIST_DIR/share"
 
 # Copy the Release executable plus our built libraries.
 cp "sr-win32/bin/$BINARY_NAME.exe" "$DIST_DIR/"
-cp sr-win32/bin/libsigrok-4.dll "$DIST_DIR/"
-cp sr-win32/bin/libsigrokcxx-4.dll "$DIST_DIR/" 2>/dev/null || true
-cp sr-win32/bin/libsigrokdecode-4.dll "$DIST_DIR/"
+if [ "$PRODUCT" = all-logic ]; then
+    # ALL LOGIC bundles its own libsigrok4DSL stack and DSView resources.
+    cp sr-win32/bin/libsigrok4DSL*.dll "$DIST_DIR/" 2>/dev/null || true
+    cp sr-win32/bin/libsigrokdecode4DSL*.dll "$DIST_DIR/" 2>/dev/null || true
+    cp -r sr-win32/share/DSView "$DIST_DIR/share/" 2>/dev/null || true
+else
+    cp sr-win32/bin/libsigrok-4.dll "$DIST_DIR/"
+    cp sr-win32/bin/libsigrokcxx-4.dll "$DIST_DIR/" 2>/dev/null || true
+    cp sr-win32/bin/libsigrokdecode-4.dll "$DIST_DIR/"
 
-# Copy sigrokdecode data (protocol decoders)
-cp -r sr-win32/share/libsigrokdecode "$DIST_DIR/share/" 2>/dev/null || true
+    # Copy sigrokdecode data (protocol decoders)
+    cp -r sr-win32/share/libsigrokdecode "$DIST_DIR/share/" 2>/dev/null || true
+fi
 
 # Collect all DLL dependencies recursively from UCRT64 environment
 echo "    Resolving DLL dependencies..."
