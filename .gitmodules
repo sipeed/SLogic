@@ -1,0 +1,20 @@
+[submodule "libsigrok"]
+	path = sources/libsigrok
+	url = https://github.com/sipeed/libsigrok.git
+	branch = slogic-dev
+[submodule "pulseview"]
+	path = sources/pulseview
+	url = https://github.com/sipeed/pulseview.git
+	branch = master
+[submodule "slogicview"]
+	path = sources/slogicview
+	url = https://github.com/sipeed/pulseview.git
+	branch = slogicview
+[submodule "libsigrokdecode"]
+	path = sources/libsigrokdecode
+	url = https://github.com/sigrokproject/libsigrokdecode.git
+	branch = master
+[submodule "sigrok-cli"]
+	path = sources/sigrok-cli
+	url = https://github.com/sigrokproject/sigrok-cli.git
+	branch = master
