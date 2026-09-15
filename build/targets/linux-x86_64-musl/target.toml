@@ -1,0 +1,6 @@
+name = "linux-x86_64-musl"
+environment = "linux-alpine-3.22"
+driver = "build"
+host_systems = ["Linux"]
+default_products = ["pulseview", "slogicview", "sigrok-cli"]
+package_format = "AppImage"

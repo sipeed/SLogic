@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""Build products for one or more declared target systems."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import slogic_toml as tomllib
+
+
+BUILD_HOME = Path(__file__).resolve().parents[1]
+WORKSPACE = BUILD_HOME.parent
+SOURCES = WORKSPACE / "sources"
+ARTIFACTS = WORKSPACE / "artifact"
+COMPONENTS_FILE = BUILD_HOME / "components.toml"
+ENVIRONMENTS_DIR = BUILD_HOME / "environments"
+TARGETS_DIR = BUILD_HOME / "targets"
+
+
+def workspace_sources() -> list[dict[str, str]]:
+    """Resolve every declared submodule to its checked-out revision."""
+    modules: dict[str, dict[str, str]] = {}
+    listing = git(WORKSPACE, "config", "-f", str(WORKSPACE / ".gitmodules"), "--list")
+    for line in listing.splitlines():
+        key, _, value = line.partition("=")
+        name, _, field = key.removeprefix("submodule.").rpartition(".")
+        if key.startswith("submodule.") and name:
+            modules.setdefault(name, {})[field] = value
+    sources = []
+    for name, module in modules.items():
+        checkout = WORKSPACE / module["path"]
+        if not git(checkout, "rev-parse", "--git-dir", check=False):
+            raise SystemExit(
+                f"missing source checkout: {module['path']} (run git submodule update --init)"
+            )
+        sources.append({
+            "name": name,
+            "path": module["path"],
+            "url": module["url"],
+            "branch": module.get("branch", ""),
+            "revision": git(checkout, "rev-parse", "HEAD"),
+            "dirty": bool(git(checkout, "status", "--porcelain")),
+        })
+    return sorted(sources, key=lambda item: item["path"])
+
+
+def load_components(path: Path) -> dict[str, dict]:
+    components: dict[str, dict] = {}
+    for name, item in tomllib.loads(path.read_text()).items():
+        item["name"] = name
+        components[name] = item
+    return components
+
+
+def load_declarations(root: Path, filename: str) -> dict[str, dict]:
+    declarations: dict[str, dict] = {}
+    for path in sorted(root.glob(f"*/{filename}")):
+        item = tomllib.loads(path.read_text())
+        item["_directory"] = path.parent
+        if item["name"] in declarations:
+            raise SystemExit(f"Duplicate declaration: {item['name']}")
+        declarations[item["name"]] = item
+    return declarations
+
+
+def git(checkout: Path, *arguments: str, check: bool = True) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(checkout), *arguments],
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def split_values(values: list[str] | None) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        for item in value.split(","):
+            item = item.strip()
+            if item and item not in result:
+                result.append(item)
+    return result
+
+
+def component_closure(products: list[str], components: dict[str, dict]) -> list[str]:
+    resolved: list[str] = []
+
+    def visit(name: str, pending: tuple[str, ...] = ()) -> None:
+        if name in pending:
+            raise SystemExit(f"Component dependency cycle: {' -> '.join((*pending, name))}")
+        if name not in components:
+            raise SystemExit(f"Unknown component: {name}")
+        for dependency in components[name].get("dependencies", []):
+            visit(dependency, (*pending, name))
+        if name not in resolved:
+            resolved.append(name)
+
+    for product in products:
+        visit(product)
+    return resolved
+
+
+def target_logic_key(target: dict, environment: dict) -> str:
+    """Hash one target's effective build logic, independent of Git state."""
+    digest = hashlib.sha256()
+    digest.update(b"slogic-target-state-v1\0")
+    roots = (BUILD_HOME / "common", target["_directory"], environment["_directory"])
+    paths = sorted(
+        path
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    )
+    for path in paths:
+        digest.update(path.relative_to(BUILD_HOME).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(f"{path.stat().st_mode & 0o777:o}".encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="./build/scripts/build",
+        description="Build declared SLogic products for one or more targets.",
+    )
+    parser.add_argument("--target", action="append", help="target name, comma-separated names, host, or all")
+    parser.add_argument("--product", action="append", help="product name, comma-separated names, or all")
+    parser.add_argument("--build-type", choices=("Debug", "Release"))
+    parser.add_argument("--jobs", type=int, help="total CPU job budget (default: BUILD_JOBS or host CPU count)")
+    parser.add_argument("--clean", action="store_true", help="discard selected target workspaces before building")
+    parser.add_argument("--rebuild-environment", action="store_true", help="rebuild container environments without cache")
+    parser.add_argument("--list", action="store_true", help="list targets and products")
+    args = parser.parse_args()
+
+    components = load_components(COMPONENTS_FILE)
+    environments = load_declarations(ENVIRONMENTS_DIR, "environment.toml")
+    targets = load_declarations(TARGETS_DIR, "target.toml")
+    for name, target in targets.items():
+        if target["environment"] not in environments:
+            parser.error(f"target {name} references unknown environment: {target['environment']}")
+    products_available = [name for name, item in components.items() if item["kind"] == "product"]
+    if args.list:
+        print("Targets:")
+        for name, target in targets.items():
+            print(f"  {name}: {target['environment']} ({target['package_format']})")
+        print("Products:")
+        for name in products_available:
+            dependencies = ", ".join(components[name].get("dependencies", [])) or "none"
+            print(f"  {name}: dependencies={dependencies}")
+        return 0
+
+    host_system = platform.system()
+    host_targets = [name for name, target in targets.items() if host_system in target["host_systems"]]
+    requested_targets = split_values(args.target) or ["all"]
+    if any(name in {"all", "host"} for name in requested_targets):
+        selected_targets = host_targets
+    else:
+        selected_targets = requested_targets
+    if not selected_targets:
+        parser.error(f"no targets support host system {host_system}")
+    for name in selected_targets:
+        if name not in targets:
+            parser.error(f"unknown target: {name}")
+        if host_system not in targets[name]["host_systems"]:
+            parser.error(f"target {name} cannot be built on {host_system}")
+
+    requested_products = split_values(args.product) or ["all"]
+    products_by_target: dict[str, list[str]] = {}
+    for target_name in selected_targets:
+        target = targets[target_name]
+        selected_products = (
+            list(target["default_products"])
+            if "all" in requested_products
+            else requested_products
+        )
+        for product in selected_products:
+            if product not in components or components[product]["kind"] != "product":
+                parser.error(f"unknown product: {product}")
+            if target_name not in components[product]["targets"]:
+                parser.error(f"product {product} does not support target {target_name}")
+        products_by_target[target_name] = selected_products
+
+    if not git(WORKSPACE, "rev-parse", "--git-dir", check=False):
+        parser.error(f"workspace is not a git checkout: {WORKSPACE}")
+    workspace_commit = git(WORKSPACE, "rev-parse", "HEAD")
+    workspace_short = workspace_commit[:12]
+    release_tags = git(WORKSPACE, "tag", "--points-at", "HEAD", "--list", "release-*").splitlines()
+    release_tag = sorted(release_tags)[-1] if release_tags else ""
+    if release_tag:
+        version_id = release_tag
+        channel = "release"
+        default_build_type = "Release"
+        release_version = release_tag.removeprefix("release-")
+    else:
+        version_id = f"dev-nightly/{workspace_short}"
+        channel = "nightly"
+        default_build_type = "Debug"
+        release_version = f"0.0.0-dev.{workspace_short}"
+    build_type = args.build_type or default_build_type
+    if channel == "release" and build_type != "Release":
+        parser.error("a release workspace must be built with Release configuration")
+
+    required_components: list[str] = []
+    for target_name, selected_products in products_by_target.items():
+        for name in component_closure(selected_products, components):
+            if target_name not in components[name]["targets"]:
+                parser.error(f"component {name} does not support target {target_name}")
+            if name not in required_components:
+                required_components.append(name)
+    checkouts = [WORKSPACE]
+    for name in required_components:
+        source = SOURCES / components[name]["source"]
+        if not git(source, "rev-parse", "--git-dir", check=False):
+            parser.error(
+                f"missing source checkout: sources/{components[name]['source']}"
+                " (run git submodule update --init)"
+            )
+        if source not in checkouts:
+            checkouts.append(source)
+    dirty = [checkout for checkout in checkouts if git(checkout, "status", "--porcelain")]
+    if channel == "release" and dirty:
+        for checkout in dirty:
+            print(f"Dirty checkout: {checkout}", file=sys.stderr)
+        parser.error("release builds require clean workspace and source checkouts")
+
+    total_jobs = args.jobs or int(os.environ.get("BUILD_JOBS", os.cpu_count() or 1))
+    if total_jobs < 1:
+        parser.error("--jobs must be positive")
+    target_jobs = max(1, total_jobs // len(selected_targets))
+    artifact_root = ARTIFACTS / version_id
+    cache_root = BUILD_HOME / "out" / "cache"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    sources_lock = artifact_root / "sources.lock.json"
+    lock = {
+        "workspace_commit": workspace_commit,
+        "workspace_dirty": bool(git(WORKSPACE, "status", "--porcelain")),
+        "version": version_id,
+        "sources": workspace_sources(),
+    }
+    sources_lock.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
+
+    print(f"Version: {version_id}")
+    print(f"Workspace: {workspace_commit}")
+    dirty_sources = [source["path"] for source in lock["sources"] if source["dirty"]]
+    if dirty_sources:
+        print(f"Uncommitted changes (dev build): {', '.join(dirty_sources)}")
+    print(f"Build type: {build_type}")
+    print(f"Total jobs: {total_jobs}; jobs per target: {target_jobs}")
+    for target_name in selected_targets:
+        print(f"Target {target_name}: {', '.join(products_by_target[target_name])}")
+
+    processes: list[tuple[str, subprocess.Popen[bytes]]] = []
+    for target_name in selected_targets:
+        target = targets[target_name]
+        build_environment = environments[target["environment"]]
+        driver = Path(target["_directory"]) / target["driver"]
+        if not driver.is_file():
+            parser.error(f"missing target driver: {driver}")
+        output = artifact_root / target_name
+        work = BUILD_HOME / "out" / target_name / build_type.lower()
+        output.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment.update({
+            "BUILD_TYPE": build_type,
+            "RELEASE_VERSION": release_version,
+            "BUILD_JOBS": str(target_jobs),
+            "CONTAINER_CPUS": str(target_jobs),
+            "SLOGIC_BUILD_LOGIC_KEY": target_logic_key(target, build_environment),
+            "SLOGIC_BUILD_ENVIRONMENT": target["environment"],
+        })
+        if args.rebuild_environment:
+            environment["REBUILD_ENVIRONMENT"] = "1"
+        command = [
+            str(driver),
+            "--sources", str(SOURCES),
+            "--output", str(output),
+            "--out", str(work),
+            "--cache", str(cache_root),
+            "--products", ",".join(products_by_target[target_name]),
+        ]
+        if args.clean:
+            command.append("--clean")
+        processes.append((target_name, subprocess.Popen(command, env=environment)))
+
+    failed = False
+    for target_name, process in processes:
+        result = process.wait()
+        if result:
+            print(f"Target failed: {target_name} (exit {result})", file=sys.stderr)
+            failed = True
+    if failed:
+        return 1
+
+    for target_name in selected_targets:
+        output = artifact_root / target_name
+        subprocess.run([
+            sys.executable,
+            str(BUILD_HOME / "scripts/write-build-info.py"),
+            "--sources-lock", str(sources_lock),
+            "--workspace-commit", workspace_commit,
+            "--version", version_id,
+            "--channel", channel,
+            "--build-type", build_type,
+            "--target", target_name,
+            "--products", ",".join(products_by_target[target_name]),
+            "--output", str(output),
+        ], check=True)
+    print(f"Artifacts: {artifact_root}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)

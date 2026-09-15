@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_DIR=$(cd "$(dirname "$0")" && pwd)
+BUILD_HOME=$(cd "$TARGET_DIR/../.." && pwd)
+SOURCES=""
+OUTPUT=""
+OUT="$BUILD_HOME/out/windows-x86_64-ucrt/${BUILD_TYPE:-release}"
+CACHE="$BUILD_HOME/out/cache"
+PRODUCTS="pulseview,slogicview,sigrok-cli"
+JOBS="${BUILD_JOBS:-$(nproc)}"
+ENGINE=""
+CPUS="${CONTAINER_CPUS:-$JOBS}"
+CLEAN=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --sources) SOURCES=$(realpath "$2"); shift 2 ;;
+        --output) OUTPUT=$(realpath -m "$2"); shift 2 ;;
+        --out) OUT=$(realpath -m "$2"); shift 2 ;;
+        --cache) CACHE=$(realpath -m "$2"); shift 2 ;;
+        --products) PRODUCTS=$2; shift 2 ;;
+        --clean) CLEAN=1; shift ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$SOURCES" ] || [ -z "$OUTPUT" ]; then
+    echo "Usage: $0 --sources DIR --output DIR --products LIST [--out DIR] [--cache DIR] [--clean]" >&2
+    exit 2
+fi
+ENGINE=$("$BUILD_HOME/scripts/resolve-container-engine")
+for project in libsigrok libsigrokdecode; do
+    test -d "$SOURCES/$project" || { echo "Missing source: $project" >&2; exit 2; }
+done
+IFS=, read -r -a product_list <<<"$PRODUCTS"
+for product in "${product_list[@]}"; do
+    case "$product" in pulseview|slogicview|sigrok-cli) ;; *) echo "Unsupported Windows product: $product" >&2; exit 2 ;; esac
+    test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
+done
+case ",$PRODUCTS," in *,pulseview,*) ;; *) rm -f "$OUTPUT/PulseView-SLogic-windows-x86_64-ucrt.exe" ;; esac
+case ",$PRODUCTS," in *,slogicview,*) ;; *) rm -f "$OUTPUT/SLogicView-SLogic-windows-x86_64-ucrt.exe" ;; esac
+case ",$PRODUCTS," in *,sigrok-cli,*) ;; *) rm -f "$OUTPUT/sigrok-cli-SLogic-windows-x86_64-ucrt.exe" ;; esac
+
+AVAILABLE_GB=$(df --output=avail -BG "$BUILD_HOME" | tail -1 | tr -dc '0-9')
+if [ -z "$AVAILABLE_GB" ] || [ "$AVAILABLE_GB" -lt "${MIN_FREE_GB:-20}" ]; then
+    echo "At least ${MIN_FREE_GB:-20} GiB free space is required" >&2
+    exit 2
+fi
+if [ "$CLEAN" -eq 1 ]; then
+    echo "Cleaning target workspace: $OUT"
+    rm -rf "$OUT"
+fi
+mkdir -p "$OUT" "$OUTPUT" "$CACHE/ccache/windows-x86_64-ucrt"
+
+IMAGE=$(CONTAINER_ENGINE="$ENGINE" "$BUILD_HOME/scripts/ensure-environment" "${SLOGIC_BUILD_ENVIRONMENT:-windows-msys2-ucrt64}")
+
+# The engine may see fewer CPUs than the host (cgroup limits); clamp --cpus.
+ENGINE_CPUS=$("$ENGINE" info --format '{{.NCPU}}' 2>/dev/null || true)
+case "$ENGINE_CPUS" in ''|*[!0-9]*) ENGINE_CPUS=$("$ENGINE" info --format '{{.Host.CPUs}}' 2>/dev/null || true) ;; esac
+case "$ENGINE_CPUS" in ''|*[!0-9]*) ENGINE_CPUS="" ;; esac
+if [ -n "$ENGINE_CPUS" ] && [ "$ENGINE_CPUS" -gt 0 ] && [ "$CPUS" -gt "$ENGINE_CPUS" ]; then
+    CPUS=$ENGINE_CPUS
+fi
+
+# Source git state is resolved on the host: submodule gitdirs live in the
+# superproject and are not visible inside the container. A trailing -dirty
+# marks uncommitted changes so the container rebuilds incrementally.
+source_env=()
+for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli; do
+    variable="SOURCE_${project^^}_STATE"
+    variable=${variable//-/_}
+    state=""
+    if git -C "$SOURCES/$project" rev-parse --git-dir >/dev/null 2>&1; then
+        state=$(git -C "$SOURCES/$project" rev-parse HEAD)
+        [ -z "$(git -C "$SOURCES/$project" status --porcelain)" ] || state="$state-dirty"
+    fi
+    source_env+=( -e "$variable=$state" )
+done
+
+"$ENGINE" run --rm \
+    --cpus="$CPUS" --memory="${CONTAINER_MEMORY:-0}" --memory-swap="${CONTAINER_MEMORY_SWAP:-0}" \
+    --pids-limit=4096 \
+    -e BUILD_JOBS="$JOBS" \
+    -e BUILD_TYPE="${BUILD_TYPE:-Release}" \
+    -e RELEASE_VERSION="${RELEASE_VERSION:-0.0.0-dev}" \
+    -e PRODUCTS="$PRODUCTS" \
+    -e SLOGIC_BUILD_LOGIC_KEY="${SLOGIC_BUILD_LOGIC_KEY:-unknown}" \
+    "${source_env[@]}" \
+    --tmpfs /tmp:rw,size=512m \
+    -v "$SOURCES:/root/.wine/drive_c/sources:ro" \
+    -v "$BUILD_HOME/common:/root/.wine/drive_c/support:ro" \
+    -v "$TARGET_DIR:/root/.wine/drive_c/target:ro" \
+    -v "$OUT:/root/.wine/drive_c/workspace" \
+    -v "$CACHE/ccache/windows-x86_64-ucrt:/root/.wine/drive_c/cache/ccache" \
+    -v "$OUTPUT:/root/.wine/drive_c/output" \
+    "$IMAGE" bash -c "/usr/bin/msys2 -c 'bash /c/target/build-in-container'"

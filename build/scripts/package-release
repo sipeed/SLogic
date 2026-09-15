@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_HOME=$(cd "$(dirname "$0")/.." && pwd)
+WORKSPACE=$(cd "$BUILD_HOME/.." && pwd)
+VERSION=${1:-}
+case "$VERSION" in
+    release-[0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "Usage: $0 release-X.Y.Z" >&2; exit 2 ;;
+esac
+SOURCE="$WORKSPACE/artifact/$VERSION"
+UPLOAD="$SOURCE/upload"
+[ -d "$SOURCE" ] || { echo "Missing release directory: $SOURCE" >&2; exit 2; }
+command -v zip >/dev/null || { echo "zip is required" >&2; exit 2; }
+command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
+[ -s "$SOURCE/sources.lock.json" ] || { echo "Missing $SOURCE/sources.lock.json" >&2; exit 1; }
+
+# A release package is complete only with all three platforms present.
+missing=""
+for target in linux-x86_64-musl windows-x86_64-ucrt macos-arm64; do
+    [ -d "$SOURCE/$target" ] || missing="$missing $target"
+done
+if [ -n "$missing" ]; then
+    echo "Missing release target directories:$missing" >&2
+    echo "Gather every platform under $SOURCE before packaging." >&2
+    exit 1
+fi
+
+# Cross-check every target against the source lock: same workspace commit,
+# release channel, clean sources, and intact artifact checksums. This catches
+# stale target directories from an earlier commit and files corrupted while
+# being gathered from the build hosts.
+python3 - "$SOURCE" "$VERSION" <<'EOF'
+import hashlib
+import json
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+version = sys.argv[2]
+failures = []
+
+lock = json.loads((source / "sources.lock.json").read_text())
+if lock.get("version") != version:
+    failures.append(f"sources.lock.json version {lock.get('version')!r} != {version!r}")
+if lock.get("workspace_dirty"):
+    failures.append("sources.lock.json records a dirty workspace")
+for item in lock.get("sources", []):
+    if item.get("dirty"):
+        failures.append(f"sources.lock.json records dirty source {item.get('path')}")
+commit = lock.get("workspace_commit", "")
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+for target in ("linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"):
+    directory = source / target
+    info_path = directory / "build-info.json"
+    if not info_path.is_file():
+        failures.append(f"{target}: missing build-info.json")
+        continue
+    info = json.loads(info_path.read_text())
+    if info.get("version") != version:
+        failures.append(f"{target}: version {info.get('version')!r} != {version!r}")
+    if info.get("channel") != "release":
+        failures.append(f"{target}: channel {info.get('channel')!r} != 'release'")
+    if info.get("build_type") != "Release":
+        failures.append(f"{target}: build type {info.get('build_type')!r} != 'Release'")
+    workspace = info.get("workspace", {})
+    if workspace.get("commit") != commit:
+        failures.append(
+            f"{target}: workspace commit {workspace.get('commit')!r}"
+            f" != lock {commit!r} (stale target directory?)"
+        )
+    if workspace.get("dirty"):
+        failures.append(f"{target}: built from a dirty workspace")
+    for item in workspace.get("sources", []):
+        if item.get("dirty"):
+            failures.append(f"{target}: built with dirty source {item.get('path')}")
+    for artifact in info.get("artifacts", []):
+        path = directory / artifact["name"]
+        if not path.is_file():
+            failures.append(f"{target}: missing artifact {artifact['name']}")
+        elif sha256(path) != artifact["sha256"]:
+            failures.append(
+                f"{target}: checksum mismatch for {artifact['name']}"
+                " (corrupted during transfer?)"
+            )
+
+if failures:
+    print("Release validation failed:", file=sys.stderr)
+    for failure in failures:
+        print(f"  - {failure}", file=sys.stderr)
+    sys.exit(1)
+print(f"Release validation passed: 3 targets consistent with workspace {commit[:12]}")
+EOF
+
+mkdir -p "$UPLOAD"
+rm -f "$UPLOAD"/*.zip "$UPLOAD/SHA256SUMS"
+short=${VERSION#release-}
+for target in linux-x86_64-musl windows-x86_64-ucrt macos-arm64; do
+    case "$target" in
+        linux-x86_64-musl)
+            platform=linux-x86_64
+            expected="PulseView-SLogic-linux-x86_64-musl.AppImage SLogicView-SLogic-linux-x86_64-musl.AppImage sigrok-cli-SLogic-linux-x86_64-musl.AppImage"
+            ;;
+        windows-x86_64-ucrt)
+            platform=windows-x86_64
+            expected="PulseView-SLogic-windows-x86_64-ucrt.exe SLogicView-SLogic-windows-x86_64-ucrt.exe sigrok-cli-SLogic-windows-x86_64-ucrt.exe"
+            ;;
+        macos-arm64)
+            platform=macos-arm64
+            expected="PulseView-SLogic-macos-arm64.dmg SLogicView-SLogic-macos-arm64.dmg sigrok-cli-SLogic-macos-arm64.zip"
+            ;;
+    esac
+    for artifact in $expected; do
+        [ -s "$SOURCE/$target/$artifact" ] || {
+            echo "Missing release artifact: $target/$artifact" >&2
+            exit 1
+        }
+    done
+    (
+        cd "$SOURCE"
+        zip -q -r "$UPLOAD/SLogic-$short-$platform.zip" "$target" sources.lock.json
+    )
+done
+(
+    cd "$UPLOAD"
+    sha256sum ./*.zip > SHA256SUMS
+    sha256sum -c SHA256SUMS
+)

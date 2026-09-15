@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_DIR=$(cd "$(dirname "$0")" && pwd)
+SOURCES=""
+OUTPUT=""
+OUT=""
+CACHE=""
+PRODUCTS="pulseview,slogicview,sigrok-cli"
+CLEAN=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --sources) SOURCES=$(cd "$2" && pwd); shift 2 ;;
+        --output) mkdir -p "$2"; OUTPUT=$(cd "$2" && pwd); shift 2 ;;
+        --out) mkdir -p "$2"; OUT=$(cd "$2" && pwd); shift 2 ;;
+        --cache) mkdir -p "$2"; CACHE=$(cd "$2" && pwd); shift 2 ;;
+        --products) PRODUCTS=$2; shift 2 ;;
+        --clean) CLEAN=1; shift ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$SOURCES" ] || [ -z "$OUTPUT" ]; then
+    echo "Usage: $0 --sources DIR --output DIR [--out DIR]" >&2
+    exit 2
+fi
+
+# The two GUI bundles and CLI archive reuse one prepared dependency graph.
+# Keep the coupled macOS release explicit instead of silently adding products.
+for required in pulseview slogicview sigrok-cli; do
+    case ",$PRODUCTS," in
+        *,$required,*) ;;
+        *) echo "macos-arm64 currently packages pulseview, slogicview and sigrok-cli together" >&2; exit 2 ;;
+    esac
+done
+
+[ "$(uname -s)" = Darwin ] || { echo "macos-arm64 must be built on macOS" >&2; exit 2; }
+[ "$(uname -m)" = arm64 ] || { echo "macos-arm64 requires an Apple Silicon host" >&2; exit 2; }
+
+arguments=(
+    --sources "$SOURCES"
+    --output "$OUTPUT"
+    --out "${OUT:-$TARGET_DIR/../../out/macos-arm64}"
+    --cache "${CACHE:-$TARGET_DIR/../../out/cache}"
+    --products "$PRODUCTS"
+    --version "${RELEASE_VERSION:-0.0.0-dev}"
+)
+[ "$CLEAN" -eq 0 ] || arguments+=(--clean)
+exec "$TARGET_DIR/build-native" "${arguments[@]}"

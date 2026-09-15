@@ -1,0 +1,32 @@
+# Component declarations: shared libraries and user-facing products.
+# `source` names a checkout under sources/; `targets` lists supported targets.
+
+[libsigrok]
+kind = "library"
+source = "libsigrok"
+dependencies = []
+targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
+
+[libsigrokdecode]
+kind = "library"
+source = "libsigrokdecode"
+dependencies = []
+targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
+
+[pulseview]
+kind = "product"
+source = "pulseview"
+dependencies = ["libsigrok", "libsigrokdecode"]
+targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
+
+[slogicview]
+kind = "product"
+source = "slogicview"
+dependencies = ["libsigrok", "libsigrokdecode"]
+targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
+
+[sigrok-cli]
+kind = "product"
+source = "sigrok-cli"
+dependencies = ["libsigrok", "libsigrokdecode"]
+targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]

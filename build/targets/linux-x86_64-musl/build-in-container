@@ -1,0 +1,301 @@
+#!/bin/bash
+set -euo pipefail
+
+SOURCE_DIR=/sources
+SUPPORT_DIR=/support
+BUILD_DIR=/workspace
+OUTPUT_DIR=/output
+JOBS="${BUILD_JOBS:-${JOBS:-$(nproc)}}"
+BUILD_TYPE="${BUILD_TYPE:-Release}"
+PRODUCTS="${PRODUCTS:-pulseview,slogicview,sigrok-cli}"
+RELEASE_VERSION="${RELEASE_VERSION:-0.0.0-dev}"
+RUNTIME=/usr/local/share/runtime-x86_64
+
+has_product() {
+    case ",$PRODUCTS," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+
+STAMP_DIR="$BUILD_DIR/.slogic-state"
+mkdir -p "$STAMP_DIR"
+logic_key="${SLOGIC_BUILD_LOGIC_KEY:-unknown}"
+workspace_invalidated=0
+if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "$logic_key" ]; then
+    echo "Build logic changed; invalidating target workspace."
+    rm -rf "$BUILD_DIR/build" "$BUILD_DIR/sr" "$BUILD_DIR/AppDir-pulseview" \
+        "$BUILD_DIR/AppDir-slogicview" "$BUILD_DIR/AppDir-sigrok-cli"
+    workspace_invalidated=1
+fi
+
+# Source states come from the host as SOURCE_<NAME>_STATE: "<commit>" for a
+# clean checkout, "<commit>-dirty" when it has uncommitted changes. A commit
+# change invalidates (rm -rf) the affected work; a dirty state only forces an
+# incremental make, and is never treated as reusable.
+state_of() {
+    local variable="SOURCE_${1^^}_STATE"
+    variable=${variable//-/_}
+    printf '%s' "${!variable:-unknown}"
+}
+
+declare -A source_state product_build
+shared_nuke=$workspace_invalidated
+shared_build=$workspace_invalidated
+for project in libsigrok libsigrokdecode; do
+    state=$(state_of "$project")
+    source_state[$project]=$state
+    stamp=""
+    [ ! -f "$STAMP_DIR/$project" ] || stamp=$(cat "$STAMP_DIR/$project")
+    [ "${stamp//-dirty/}" = "${state//-dirty/}" ] || shared_nuke=1
+    if [ "$stamp" != "$state" ] || [[ "$state" == *-dirty ]]; then
+        shared_build=1
+    fi
+done
+if [ "$shared_nuke" -eq 1 ]; then
+    echo "Shared sigrok dependency changed; invalidating dependent work."
+    rm -rf "$BUILD_DIR/build" "$BUILD_DIR/sr" "$BUILD_DIR/AppDir-pulseview" \
+        "$BUILD_DIR/AppDir-slogicview" "$BUILD_DIR/AppDir-sigrok-cli"
+    shared_build=1
+elif [ "$shared_build" -eq 1 ]; then
+    echo "Shared sigrok dependency state changed; rebuilding incrementally."
+fi
+for product in pulseview slogicview sigrok-cli; do
+    has_product "$product" || continue
+    state=$(state_of "$product")
+    source_state[$product]=$state
+    product_build[$product]=$shared_build
+    stamp=""
+    [ ! -f "$STAMP_DIR/$product" ] || stamp=$(cat "$STAMP_DIR/$product")
+    if [ "${stamp//-dirty/}" != "${state//-dirty/}" ]; then
+        product_build[$product]=1
+        rm -rf "$BUILD_DIR/build/$product" "$BUILD_DIR/AppDir-$product"
+    elif [ "$stamp" != "$state" ] || [[ "$state" == *-dirty ]]; then
+        product_build[$product]=1
+    fi
+done
+
+export CCACHE_DIR=/cache/ccache
+ccache --max-size "${CCACHE_MAX_SIZE:-20G}" >/dev/null
+if [ -d /usr/lib/ccache/bin ]; then
+    export PATH="/usr/lib/ccache/bin:$PATH"
+fi
+
+echo "=== Sigrok musl AppImage Build (Alpine 3.22) ==="
+echo "Toolchain: $(cc --version | head -n 1); libc: musl; jobs: $JOBS; type: $BUILD_TYPE"
+
+echo "[1/5] Synchronizing source code into persistent workspace..."
+projects=(libsigrok libsigrokdecode)
+has_product pulseview && projects+=(pulseview)
+has_product slogicview && projects+=(slogicview)
+has_product sigrok-cli && projects+=(sigrok-cli)
+for project in "${projects[@]}"; do
+    rsync -a --delete --exclude='.git' "$SOURCE_DIR/$project/" "$BUILD_DIR/$project/"
+done
+cp "$SUPPORT_DIR/Makefile" "$BUILD_DIR/Makefile"
+cd "$BUILD_DIR"
+
+if [ "$shared_build" -eq 1 ]; then
+    echo "[2/5] Building shared dependencies once..."
+    make JOBS="$JOBS" BUILD_TYPE="$BUILD_TYPE" \
+        LIBSIGROKDECODE_CONFIGURE_OPTS="--enable-shared --disable-static" \
+        PULSEVIEW_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE -DBoost_USE_STATIC_LIBS=OFF -DSTATIC_PKGDEPS_LIBS=OFF" \
+        install-sigrok-dependencies
+else
+    echo "[2/5] Reusing shared libsigrok and libsigrokdecode prefix."
+fi
+
+build_targets=()
+for product in pulseview slogicview sigrok-cli; do
+    has_product "$product" && [ "${product_build[$product]}" -eq 1 ] && build_targets+=("install-$product")
+done
+if [ "${#build_targets[@]}" -gt 0 ]; then
+    product_jobs=$((JOBS / ${#build_targets[@]}))
+    [ "$product_jobs" -ge 1 ] || product_jobs=1
+    echo "Building changed products in parallel: ${build_targets[*]} (${product_jobs} jobs each)"
+    make -j"${#build_targets[@]}" JOBS="$product_jobs" BUILD_TYPE="$BUILD_TYPE" RELEASE_VERSION="$RELEASE_VERSION" \
+        LIBSIGROKDECODE_CONFIGURE_OPTS="--enable-shared --disable-static" \
+        PULSEVIEW_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE -DBoost_USE_STATIC_LIBS=OFF -DSTATIC_PKGDEPS_LIBS=OFF" \
+        "${build_targets[@]}"
+else
+    echo "Reusing all selected product builds."
+fi
+
+PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+QT_PLUGIN_DIR=/usr/lib/qt6/plugins
+QT_TRANSLATION_DIR=/usr/share/qt6/translations
+
+bundle_python() {
+    local appdir=$1
+    local source="/usr/lib/python${PYTHON_VERSION}"
+    [ -d "$source" ] || return 0
+    mkdir -p "$appdir/usr/lib/python${PYTHON_VERSION}"
+    rsync -a \
+        --exclude='__pycache__' --exclude='test' --exclude='tests' \
+        --exclude='site-packages' --exclude='tkinter' --exclude='idlelib' \
+        --exclude='turtledemo' \
+        "$source/" "$appdir/usr/lib/python${PYTHON_VERSION}/"
+}
+
+bundle_elf_dependencies() {
+    local appdir=$1
+    local elf dep source destination pass copied
+    mkdir -p "$appdir/usr/lib"
+    # Repeat because newly copied libraries can introduce dependencies that
+    # were not present in the initial application tree.
+    for pass in 1 2 3 4 5 6 7 8; do
+        copied=0
+        while IFS= read -r -d '' elf; do
+            file "$elf" | grep -q ELF || continue
+            while IFS= read -r dep; do
+                [ -n "$dep" ] || continue
+                destination="$appdir/usr/lib/$dep"
+                if [ ! -e "$destination" ]; then
+                    source=""
+                    for candidate in "$BUILD_DIR/sr/lib/$dep" "/lib/$dep" "/usr/lib/$dep"; do
+                        if [ -e "$candidate" ]; then
+                            source=$candidate
+                            break
+                        fi
+                    done
+                    if [ -z "$source" ]; then
+                        source=$(find /lib /usr/lib -name "$dep" -print -quit)
+                    fi
+                    if [ -z "$source" ]; then
+                        echo "Unable to bundle dependency $dep required by $elf" >&2
+                        exit 1
+                    fi
+                    cp -L "$source" "$destination"
+                    copied=1
+                fi
+            done < <(scanelf --needed --nobanner --format '%n' "$elf" | sed 's/ .*$//' | tr ',' '\n')
+        done < <(find "$appdir" -type f -print0)
+        [ "$copied" -eq 1 ] || break
+    done
+    cp -L /lib/ld-musl-x86_64.so.1 "$appdir/usr/lib/ld-musl-x86_64.so.1"
+}
+
+write_apprun() {
+    local appdir=$1 executable=$2 qt=$3
+    cat > "$appdir/AppRun" <<EOF
+#!/bin/sh
+HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+export LD_LIBRARY_PATH="\$HERE/usr/lib"
+export PYTHONHOME="\$HERE/usr"
+export PYTHONPATH="\$HERE/usr/lib/python${PYTHON_VERSION}"
+export PYTHONNOUSERSITE=1
+export SIGROKDECODE_DIR="\$HERE/usr/share/libsigrokdecode/decoders"
+EOF
+    if [ "$qt" = yes ]; then
+        cat >> "$appdir/AppRun" <<'EOF'
+export QT_PLUGIN_PATH="$HERE/usr/plugins"
+export FONTCONFIG_PATH="$HERE/etc/fonts"
+export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+EOF
+    fi
+    cat >> "$appdir/AppRun" <<EOF
+exec "\$HERE/usr/lib/ld-musl-x86_64.so.1" --library-path "\$HERE/usr/lib" "\$HERE/usr/bin/$executable" "\$@"
+EOF
+    chmod +x "$appdir/AppRun"
+}
+
+make_appimage() {
+    local appdir=$1 output=$2
+    [ -s "$RUNTIME" ] || { echo "Missing AppImage runtime: $RUNTIME" >&2; exit 1; }
+    mksquashfs "$appdir" "$output.squashfs" -root-owned -noappend -comp zstd -processors "$JOBS"
+    cp "$RUNTIME" "$output"
+    cat "$output.squashfs" >> "$output"
+    chmod +x "$output"
+    rm "$output.squashfs"
+}
+
+PULSEVIEW_OUTPUT="$OUTPUT_DIR/PulseView-SLogic-linux-x86_64-musl.AppImage"
+SLOGICVIEW_OUTPUT="$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64-musl.AppImage"
+SIGROK_CLI_OUTPUT="$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64-musl.AppImage"
+pulseview_package=0
+slogicview_package=0
+sigrok_cli_package=0
+has_product pulseview && { [ "${product_build[pulseview]}" -eq 1 ] || [ ! -s "$PULSEVIEW_OUTPUT" ]; } && pulseview_package=1
+has_product slogicview && { [ "${product_build[slogicview]}" -eq 1 ] || [ ! -s "$SLOGICVIEW_OUTPUT" ]; } && slogicview_package=1
+has_product sigrok-cli && { [ "${product_build[sigrok-cli]}" -eq 1 ] || [ ! -s "$SIGROK_CLI_OUTPUT" ]; } && sigrok_cli_package=1
+
+create_gui_appdir() {
+    local appdir=$1 executable=$2 desktop=$3 icon=$4 label=$5
+    echo "[3/5] Creating $label musl AppDir..."
+    rm -rf "$appdir"
+    mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" "$appdir/usr/share" "$appdir/usr/plugins"
+    cp "sr/bin/$executable" "$appdir/usr/bin/"
+    cp -a sr/lib/. "$appdir/usr/lib/"
+    cp -a sr/share/. "$appdir/usr/share/"
+    for plugin_group in platforms imageformats iconengines styles tls xcbglintegrations wayland-decoration-client wayland-graphics-integration-client wayland-shell-integration; do
+        if [ -d "$QT_PLUGIN_DIR/$plugin_group" ]; then
+            mkdir -p "$appdir/usr/plugins/$plugin_group"
+            cp -a "$QT_PLUGIN_DIR/$plugin_group/." "$appdir/usr/plugins/$plugin_group/"
+        fi
+    done
+    if [ -d "$QT_TRANSLATION_DIR" ]; then
+        mkdir -p "$appdir/usr/share/qt6/translations"
+        cp -a "$QT_TRANSLATION_DIR/." "$appdir/usr/share/qt6/translations/"
+    fi
+    # Bundle a compatible fontconfig configuration while allowing the runtime
+    # to discover fonts installed by the host.
+    mkdir -p "$appdir/etc/fonts"
+    rsync -aL \
+        --exclude='conf.d/48-guessfamily.conf' \
+        --exclude='conf.d/48-spacing.conf' \
+        --exclude='conf.d/49-sansserif.conf' \
+        /etc/fonts/ "$appdir/etc/fonts/"
+    bundle_python "$appdir"
+    bundle_elf_dependencies "$appdir"
+    write_apprun "$appdir" "$executable" yes
+    cp "sr/share/applications/$desktop" "$appdir/"
+    cp "sr/share/icons/hicolor/scalable/apps/$icon" "$appdir/"
+    ln -s "$icon" "$appdir/.DirIcon"
+}
+
+PV_APPDIR=AppDir-pulseview
+SV_APPDIR=AppDir-slogicview
+[ "$pulseview_package" -eq 0 ] || create_gui_appdir \
+    "$PV_APPDIR" pulseview org.sigrok.PulseView.desktop pulseview.svg PulseView
+[ "$slogicview_package" -eq 0 ] || create_gui_appdir \
+    "$SV_APPDIR" slogicview com.sipeed.SLogicView.desktop slogicview.svg SLogicView
+
+if [ "$sigrok_cli_package" -eq 1 ]; then
+echo "[4/5] Creating sigrok-cli musl AppDir..."
+CLI_APPDIR=AppDir-sigrok-cli
+rm -rf "$CLI_APPDIR"
+mkdir -p "$CLI_APPDIR/usr/bin" "$CLI_APPDIR/usr/lib" "$CLI_APPDIR/usr/share"
+cp sr/bin/sigrok-cli "$CLI_APPDIR/usr/bin/"
+cp -a sr/lib/. "$CLI_APPDIR/usr/lib/"
+cp -a sr/share/libsigrokdecode "$CLI_APPDIR/usr/share/"
+bundle_python "$CLI_APPDIR"
+bundle_elf_dependencies "$CLI_APPDIR"
+write_apprun "$CLI_APPDIR" sigrok-cli no
+cp sigrok-cli/contrib/org.sigrok.sigrok-cli.desktop "$CLI_APPDIR/"
+cp sigrok-cli/contrib/sigrok-cli.svg "$CLI_APPDIR/"
+ln -s sigrok-cli.svg "$CLI_APPDIR/.DirIcon"
+fi
+
+echo "[5/5] Writing AppImages..."
+mkdir -p "$OUTPUT_DIR"
+if [ "$pulseview_package" -eq 1 ]; then
+    rm -f "$PULSEVIEW_OUTPUT"
+    make_appimage "$PV_APPDIR" "$PULSEVIEW_OUTPUT"
+fi
+if [ "$slogicview_package" -eq 1 ]; then
+    rm -f "$SLOGICVIEW_OUTPUT"
+    make_appimage "$SV_APPDIR" "$SLOGICVIEW_OUTPUT"
+fi
+if [ "$sigrok_cli_package" -eq 1 ]; then
+    rm -f "$SIGROK_CLI_OUTPUT"
+    make_appimage "$CLI_APPDIR" "$SIGROK_CLI_OUTPUT"
+fi
+artifacts=()
+has_product pulseview && artifacts+=("$OUTPUT_DIR/PulseView-SLogic-linux-x86_64-musl.AppImage")
+has_product slogicview && artifacts+=("$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64-musl.AppImage")
+has_product sigrok-cli && artifacts+=("$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64-musl.AppImage")
+file "${artifacts[@]}"
+ls -lh "${artifacts[@]}"
+
+printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
+for project in "${projects[@]}"; do
+    printf '%s\n' "${source_state[$project]}" > "$STAMP_DIR/$project"
+done
+ccache --show-stats || true

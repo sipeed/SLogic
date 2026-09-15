@@ -1,0 +1,5 @@
+name = "linux-alpine-3.22"
+executor = "docker"
+image = "slogic/buildenv-linux-alpine-3.22"
+description = "Alpine 3.22 native x86_64 musl SDK"
+

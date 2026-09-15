@@ -1,0 +1,130 @@
+#!/bin/bash
+set -euo pipefail
+
+BUILD_ROOT=/c/workspace
+SOURCE_ROOT=/c/sources
+OUTPUT=/c/output
+JOBS="${BUILD_JOBS:-$(nproc)}"
+PRODUCTS="${PRODUCTS:-pulseview,slogicview,sigrok-cli}"
+STAMP_DIR="$BUILD_ROOT/.slogic-state"
+
+has_product() {
+    case ",$PRODUCTS," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+
+mkdir -p "$BUILD_ROOT" "$STAMP_DIR" "$OUTPUT" "$BUILD_ROOT/tmp"
+export TMPDIR="$BUILD_ROOT/tmp" TMP="$BUILD_ROOT/tmp" TEMP="$BUILD_ROOT/tmp"
+export CCACHE_DIR=/c/cache/ccache
+ccache --max-size "${CCACHE_MAX_SIZE:-20G}" >/dev/null || true
+if [ -d /ucrt64/lib/ccache/bin ]; then
+    export PATH="/ucrt64/lib/ccache/bin:$PATH"
+fi
+
+logic_key="${SLOGIC_BUILD_LOGIC_KEY:-unknown}"
+workspace_invalidated=0
+if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "$logic_key" ]; then
+    echo "Build logic changed; invalidating Windows target workspace."
+    rm -rf "$BUILD_ROOT/build-win32" "$BUILD_ROOT/sr-win32" \
+        "$BUILD_ROOT/PulseView-win64-portable" "$BUILD_ROOT/SLogicView-win64-portable" \
+        "$BUILD_ROOT/sigrok-cli-portable"
+    workspace_invalidated=1
+fi
+
+# Source states come from the host as SOURCE_<NAME>_STATE: "<commit>" for a
+# clean checkout, "<commit>-dirty" when it has uncommitted changes. A commit
+# change invalidates (rm -rf) the affected work; a dirty state only forces an
+# incremental rebuild, and is never treated as reusable.
+shared_state="${SOURCE_LIBSIGROK_STATE:-unknown}:${SOURCE_LIBSIGROKDECODE_STATE:-unknown}:${BUILD_TYPE:-Release}"
+shared_stamp=""
+[ ! -f "$STAMP_DIR/shared" ] || shared_stamp=$(cat "$STAMP_DIR/shared")
+shared_build=$workspace_invalidated
+if [ "${shared_stamp//-dirty/}" != "${shared_state//-dirty/}" ]; then
+    echo "Shared sigrok dependency changed; invalidating Windows products."
+    rm -rf "$BUILD_ROOT/build-win32" "$BUILD_ROOT/sr-win32" \
+        "$BUILD_ROOT/PulseView-win64-portable" "$BUILD_ROOT/SLogicView-win64-portable" \
+        "$BUILD_ROOT/sigrok-cli-portable"
+    shared_build=1
+elif [ "$shared_stamp" != "$shared_state" ] || [[ "$shared_state" == *-dirty* ]]; then
+    echo "Shared sigrok dependency state changed; rebuilding incrementally."
+    shared_build=1
+fi
+declare -A product_build product_state
+for product in pulseview slogicview sigrok-cli; do
+    has_product "$product" || continue
+    variable="SOURCE_${product^^}_STATE"
+    variable=${variable//-/_}
+    state="${!variable:-unknown}:${BUILD_TYPE:-Release}"
+    product_state[$product]=$state
+    product_build[$product]=$shared_build
+    stamp=""
+    [ ! -f "$STAMP_DIR/$product" ] || stamp=$(cat "$STAMP_DIR/$product")
+    output_name="$product-SLogic-windows-x86_64-ucrt.exe"
+    [ "$product" = pulseview ] && output_name="PulseView-SLogic-windows-x86_64-ucrt.exe"
+    [ "$product" = slogicview ] && output_name="SLogicView-SLogic-windows-x86_64-ucrt.exe"
+    if [ "${stamp//-dirty/}" != "${state//-dirty/}" ]; then
+        product_build[$product]=1
+        rm -rf "$BUILD_ROOT/build-win32/$product" "$BUILD_ROOT/$product-portable" \
+            "$BUILD_ROOT/PulseView-win64-portable" "$BUILD_ROOT/SLogicView-win64-portable"
+    elif [ "$stamp" != "$state" ] || [[ "$state" == *-dirty* ]] || [ ! -s "$OUTPUT/$output_name" ]; then
+        product_build[$product]=1
+    fi
+done
+
+echo "Synchronizing sources into persistent Windows workspace..."
+projects=(libsigrok libsigrokdecode)
+has_product pulseview && projects+=(pulseview)
+has_product slogicview && projects+=(slogicview)
+has_product sigrok-cli && projects+=(sigrok-cli)
+for project in "${projects[@]}"; do
+    rsync -a --delete --exclude=.git --exclude=build \
+        "$SOURCE_ROOT/$project/" "$BUILD_ROOT/$project/"
+done
+cp /c/support/Makefile "$BUILD_ROOT/Makefile"
+
+cd "$BUILD_ROOT"
+if [ "$shared_build" -eq 1 ]; then
+    echo "Building shared libsigrok and libsigrokdecode once ($JOBS jobs)..."
+    make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
+        LIBSIGROKDECODE_CONFIGURE_OPTS="--enable-shared --enable-static" \
+        install-sigrok-dependencies
+else
+    echo "Reusing shared Windows libsigrok and libsigrokdecode prefix."
+fi
+
+product_count=0
+pids=()
+has_product pulseview && [ "${product_build[pulseview]}" -eq 1 ] && product_count=$((product_count + 1))
+has_product slogicview && [ "${product_build[slogicview]}" -eq 1 ] && product_count=$((product_count + 1))
+has_product sigrok-cli && [ "${product_build[sigrok-cli]}" -eq 1 ] && product_count=$((product_count + 1))
+if [ "$product_count" -gt 0 ]; then
+    product_jobs=$((JOBS / product_count))
+    [ "$product_jobs" -ge 1 ] || product_jobs=1
+else
+    product_jobs=$JOBS
+    echo "Reusing all selected Windows product builds and packages."
+fi
+if has_product pulseview && [ "${product_build[pulseview]}" -eq 1 ]; then
+    PRODUCT=pulseview DISPLAY_NAME=PulseView BINARY_NAME=pulseview \
+        BUILD_JOBS="$product_jobs" bash /c/target/build-pulseview-in-container &
+    pids+=("$!")
+fi
+if has_product slogicview && [ "${product_build[slogicview]}" -eq 1 ]; then
+    PRODUCT=slogicview DISPLAY_NAME=SLogicView BINARY_NAME=slogicview \
+        BUILD_JOBS="$product_jobs" bash /c/target/build-pulseview-in-container &
+    pids+=("$!")
+fi
+if has_product sigrok-cli && [ "${product_build[sigrok-cli]}" -eq 1 ]; then
+    BUILD_JOBS="$product_jobs" bash /c/target/build-cli-in-container &
+    pids+=("$!")
+fi
+failed=0
+for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+[ "$failed" -eq 0 ] || { echo "One or more Windows product builds failed" >&2; exit 1; }
+
+printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
+printf '%s\n' "$shared_state" > "$STAMP_DIR/shared"
+for product in pulseview slogicview sigrok-cli; do
+    has_product "$product" || continue
+    printf '%s\n' "${product_state[$product]}" > "$STAMP_DIR/$product"
+done
+ccache --show-stats || true

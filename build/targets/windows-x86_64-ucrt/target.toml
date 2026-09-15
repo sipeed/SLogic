@@ -1,0 +1,6 @@
+name = "windows-x86_64-ucrt"
+environment = "windows-msys2-ucrt64"
+driver = "build"
+host_systems = ["Linux"]
+default_products = ["pulseview", "slogicview", "sigrok-cli"]
+package_format = "single-file EXE"

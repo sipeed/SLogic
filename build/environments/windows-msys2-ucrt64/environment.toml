@@ -1,0 +1,5 @@
+name = "windows-msys2-ucrt64"
+executor = "docker"
+image = "slogic/buildenv-windows-msys2-ucrt64"
+description = "MSYS2 UCRT64 SDK hosted by the Wine-based Docker image"
+

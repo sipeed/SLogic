@@ -1,0 +1,6 @@
+name = "macos-arm64"
+environment = "macos-xcode"
+driver = "build"
+host_systems = ["Darwin"]
+default_products = ["pulseview", "slogicview", "sigrok-cli"]
+package_format = "DMG and portable ZIP"

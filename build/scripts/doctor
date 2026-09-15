@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_HOME=$(cd "$(dirname "$0")/.." && pwd)
+WORKSPACE=$(cd "$BUILD_HOME/.." && pwd)
+failed=0
+
+check() {
+    if "$@" >/dev/null 2>&1; then
+        printf 'ok    %s\n' "$*"
+    else
+        printf 'error %s\n' "$*" >&2
+        failed=1
+    fi
+}
+
+check command -v git
+check git -C "$WORKSPACE" rev-parse --git-dir
+check test -f "$WORKSPACE/.gitmodules"
+if git -C "$WORKSPACE" submodule status | grep -q '^-'; then
+    printf 'error uninitialized submodules; run: git -C %s submodule update --init\n' "$WORKSPACE" >&2
+    failed=1
+else
+    printf 'ok    git -C %s submodule status\n' "$WORKSPACE"
+fi
+for source in $(PYTHONPATH="$BUILD_HOME/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import pathlib
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import slogic_toml as tomllib
+for component in tomllib.loads(pathlib.Path(sys.argv[1]).read_text()).values():
+    print(component["source"])
+' "$BUILD_HOME/components.toml" | sort -u); do
+    check git -C "$WORKSPACE/sources/$source" rev-parse --git-dir
+done
+
+case "$(uname -s)" in
+    Linux)
+        check "$BUILD_HOME/scripts/resolve-container-engine"
+        check command -v python3
+        check test -x "$BUILD_HOME/scripts/ensure-environment"
+        ;;
+    Darwin)
+        check command -v xcodebuild
+        # Non-interactive shells may lack the Homebrew PATH; build-native
+        # resolves it itself, so accept the brew-installed cmake too.
+        check bash -c "command -v cmake || test -x /opt/homebrew/bin/cmake"
+        check command -v python3
+        ;;
+esac
+
+[ "$failed" -eq 0 ]

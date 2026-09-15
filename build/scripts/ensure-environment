@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Resolve and prepare an immutable, content-addressed build environment."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import slogic_toml as tomllib
+
+
+BUILD_HOME = Path(__file__).resolve().parents[1]
+ENVIRONMENTS = BUILD_HOME / "environments"
+
+
+def environment_digest(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(directory).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def run(arguments: list[str], *, quiet: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        arguments,
+        check=False,
+        text=True,
+        stdout=subprocess.DEVNULL if quiet else None,
+        stderr=subprocess.DEVNULL if quiet else None,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("environment")
+    parser.add_argument("--print-only", action="store_true")
+    args = parser.parse_args()
+
+    directory = ENVIRONMENTS / args.environment
+    config_path = directory / "environment.toml"
+    if not config_path.is_file():
+        parser.error(f"unknown environment: {args.environment}")
+    config = tomllib.loads(config_path.read_text())
+    if config["executor"] != "docker":
+        parser.error(f"environment is not container based: {args.environment}")
+
+    engine = os.environ.get("CONTAINER_ENGINE", "")
+    if not engine:
+        engine = subprocess.run(
+            [str(BUILD_HOME / "scripts" / "resolve-container-engine")],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+    if not shutil_which(engine):
+        parser.error(f"container engine not found: {engine}")
+
+    digest = environment_digest(directory)
+    image = f"{config['image']}:{digest[:16]}"
+    if args.print_only:
+        print(image)
+        return 0
+
+    exists = run([engine, "image", "inspect", image], quiet=True).returncode == 0
+    rebuild = os.environ.get("REBUILD_ENVIRONMENT") == "1"
+    if not exists or rebuild:
+        print(f"Preparing build environment {args.environment} -> {image}", file=sys.stderr)
+        command = [engine, "build", "--label", f"org.sipeed.slogic.environment={args.environment}"]
+        command += ["--label", f"org.sipeed.slogic.environment.digest={digest}"]
+        if rebuild:
+            command.append("--no-cache")
+        if Path(engine).name == "podman":
+            command += ["--format", "docker"]
+        command += ["-t", image, "-f", str(directory / "Dockerfile"), str(directory)]
+        # stdout is the machine-readable return channel used by callers to
+        # capture the final image reference. Keep all builder output on stderr.
+        subprocess.run(command, check=True, stdout=sys.stderr)
+    else:
+        print(f"Reusing build environment {image}", file=sys.stderr)
+    print(image)
+    return 0
+
+
+def shutil_which(command: str) -> str | None:
+    if "/" in command:
+        return command if os.access(command, os.X_OK) else None
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory) / command
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

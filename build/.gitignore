@@ -1,0 +1,7 @@
+/out/
+
+*.log
+__pycache__/
+*.py[cod]
+.idea/
+.vscode/

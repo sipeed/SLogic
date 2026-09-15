@@ -1,0 +1,202 @@
+#!/bin/bash
+set -euo pipefail
+
+BUILD_DIR=/c/workspace
+OUTPUT=/c/output
+BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
+PRODUCT="${PRODUCT:-pulseview}"
+DISPLAY_NAME="${DISPLAY_NAME:-PulseView}"
+BINARY_NAME="${BINARY_NAME:-pulseview}"
+PORTABLE_NAME="${DISPLAY_NAME}-win64-portable"
+OUTPUT_NAME="${DISPLAY_NAME}-SLogic-windows-x86_64-ucrt.exe"
+LAUNCHER_NAME="${DISPLAY_NAME}.exe"
+mkdir -p "$BUILD_DIR/tmp"
+export TMPDIR="$BUILD_DIR/tmp"
+export TMP="$BUILD_DIR/tmp"
+export TEMP="$BUILD_DIR/tmp"
+
+echo "=== $DISPLAY_NAME Windows Portable Build (MSYS2 UCRT64) ==="
+
+cd "$BUILD_DIR"
+
+echo "Building $DISPLAY_NAME ${BUILD_TYPE:-Release} (${BUILD_JOBS} jobs) against shared prefix..."
+export PATH="$BUILD_DIR/sr-win32/bin:/ucrt64/bin:$PATH"
+export PKG_CONFIG_PATH="$BUILD_DIR/sr-win32/lib/pkgconfig:/ucrt64/lib/pkgconfig"
+if [ ! -f "build-win32/$PRODUCT/build/CMakeCache.txt" ]; then
+    mkdir -p "build-win32/$PRODUCT"
+    rsync -a --delete --exclude=.git --exclude=build "$PRODUCT/" "build-win32/$PRODUCT/"
+    cmake_args=(
+        -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/sr-win32" \
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}" \
+        -DBoost_USE_STATIC_LIBS=OFF \
+        -DSTATIC_PKGDEPS_LIBS=OFF
+    )
+    if [ "$PRODUCT" = slogicview ]; then
+        cmake_args+=("-DSLOGICVIEW_VERSION=${RELEASE_VERSION:-0.0.0-dev}")
+    fi
+    cmake -S "build-win32/$PRODUCT" -B "build-win32/$PRODUCT/build" "${cmake_args[@]}"
+fi
+cmake --build "build-win32/$PRODUCT/build" -j"$BUILD_JOBS"
+cmake --build "build-win32/$PRODUCT/build" --target install
+
+echo "[3/5] Preparing Release package..."
+export PKG_CONFIG_PATH="$BUILD_DIR/sr-win32/lib/pkgconfig"
+export PATH="$BUILD_DIR/sr-win32/bin:/ucrt64/bin:$PATH"
+
+echo "[4/5] Packaging portable distribution..."
+DIST_DIR="$BUILD_DIR/$PORTABLE_NAME"
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR/share"
+
+# Copy the Release executable plus our built libraries.
+cp "sr-win32/bin/$BINARY_NAME.exe" "$DIST_DIR/"
+cp sr-win32/bin/libsigrok-4.dll "$DIST_DIR/"
+cp sr-win32/bin/libsigrokcxx-4.dll "$DIST_DIR/" 2>/dev/null || true
+cp sr-win32/bin/libsigrokdecode-4.dll "$DIST_DIR/"
+
+# Copy sigrokdecode data (protocol decoders)
+cp -r sr-win32/share/libsigrokdecode "$DIST_DIR/share/" 2>/dev/null || true
+
+# Collect all DLL dependencies recursively from UCRT64 environment
+echo "    Resolving DLL dependencies..."
+UCRT64_BIN="/ucrt64/bin"
+CHECKED=""
+QUEUE=$(for exe_file in "$DIST_DIR/$BINARY_NAME.exe"; do
+    objdump -p "$exe_file" 2>/dev/null | grep "DLL Name" | awk '{print $3}'
+done)
+
+# Add DLLs from our built libs too
+for dll_file in "$DIST_DIR"/*.dll; do
+    QUEUE="$QUEUE $(objdump -p "$dll_file" 2>/dev/null | grep "DLL Name" | awk '{print $3}')"
+done
+
+# BFS resolve dependencies
+while [ -n "$QUEUE" ]; do
+    NEW_QUEUE=""
+    for dll in $QUEUE; do
+        # Skip Windows system DLLs and already checked
+        case "${dll,,}" in
+            kernel32.dll|user32.dll|gdi32.dll|shell32.dll|advapi32.dll|ole32.dll|oleaut32.dll|imm32.dll|comdlg32.dll|ws2_32.dll|netapi32.dll|userenv.dll|crypt32.dll|winspool.drv|dnsapi.dll|iphlpapi.dll|setupapi.dll|bcrypt.dll|ntdll.dll|winmm.dll|version.dll|dwmapi.dll|uxtheme.dll|d3d11.dll|dxgi.dll|wtsapi32.dll|wsock32.dll|authz.dll|cfgmgr32.dll|comctl32.dll|propsys.dll|rpcrt4.dll|secur32.dll|shlwapi.dll|winhttp.dll|psapi.dll|dbghelp.dll|api-ms-win-*|ucrtbase.dll)
+                continue ;;
+        esac
+        echo "$CHECKED" | grep -qw "$dll" && continue
+        CHECKED="$CHECKED $dll"
+
+        source_dll=""
+        [ -f "$BUILD_DIR/sr-win32/bin/$dll" ] && source_dll="$BUILD_DIR/sr-win32/bin/$dll"
+        [ -n "$source_dll" ] || [ ! -f "$UCRT64_BIN/$dll" ] || source_dll="$UCRT64_BIN/$dll"
+        if [ -n "$source_dll" ]; then
+            cp "$source_dll" "$DIST_DIR/"
+            # Find next level deps
+            for dep in $(objdump -p "$source_dll" 2>/dev/null | grep "DLL Name" | awk '{print $3}'); do
+                echo "$CHECKED" | grep -qw "$dep" || NEW_QUEUE="$NEW_QUEUE $dep"
+            done
+        elif [ -f "/c/windows/system32/$dll" ]; then
+            # The executable imports this from Windows itself; it must not be
+            # copied into the portable payload.
+            continue
+        else
+            echo "Missing portable DLL: $dll" >&2
+            exit 1
+        fi
+    done
+    QUEUE="$NEW_QUEUE"
+done
+
+# Copy Qt6 plugins (platforms, imageformats, iconengines, styles, tls)
+echo "    Bundling Qt6 plugins..."
+QT6_PLUGIN_DIR="/ucrt64/share/qt6/plugins"
+for subdir in platforms imageformats iconengines styles tls; do
+    if [ -d "$QT6_PLUGIN_DIR/$subdir" ]; then
+        mkdir -p "$DIST_DIR/$subdir"
+        cp "$QT6_PLUGIN_DIR/$subdir"/*.dll "$DIST_DIR/$subdir/" 2>/dev/null || true
+        # Resolve deps of each plugin DLL
+        for plugin_dll in "$DIST_DIR/$subdir"/*.dll; do
+            for dep in $(objdump -p "$plugin_dll" 2>/dev/null | grep "DLL Name" | awk '{print $3}'); do
+                case "${dep,,}" in kernel32.dll|user32.dll|gdi32.dll|shell32.dll|advapi32.dll|ole32.dll|oleaut32.dll|imm32.dll|comdlg32.dll|ws2_32.dll|crypt32.dll|bcrypt.dll|ntdll.dll|version.dll|winmm.dll|authz.dll|cfgmgr32.dll|comctl32.dll|propsys.dll|rpcrt4.dll|secur32.dll|shlwapi.dll|api-ms-win-*|ucrtbase.dll) continue ;; esac
+                source_dll=""
+                [ -f "$BUILD_DIR/sr-win32/bin/$dep" ] && source_dll="$BUILD_DIR/sr-win32/bin/$dep"
+                [ -n "$source_dll" ] || [ ! -f "$UCRT64_BIN/$dep" ] || source_dll="$UCRT64_BIN/$dep"
+                if [ -n "$source_dll" ] && [ ! -f "$DIST_DIR/$dep" ]; then
+                    cp "$source_dll" "$DIST_DIR/"
+                fi
+            done
+        done
+    fi
+done
+
+# Copy Qt6 translations
+if [ -d "/ucrt64/share/qt6/translations" ]; then
+    mkdir -p "$DIST_DIR/translations"
+    cp /ucrt64/share/qt6/translations/*.qm "$DIST_DIR/translations/" 2>/dev/null || true
+fi
+
+# Bundle Python stdlib
+PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PYTHON_LIB="/ucrt64/lib/python${PYTHON_VERSION}"
+if [ -d "$PYTHON_LIB" ]; then
+    echo "    Bundling Python $PYTHON_VERSION stdlib..."
+    mkdir -p "$DIST_DIR/lib/python${PYTHON_VERSION}"
+    rsync -a \
+        --exclude='__pycache__' \
+        --exclude='test' \
+        --exclude='tests' \
+        --exclude='site-packages' \
+        --exclude='config-*' \
+        --exclude='lib2to3' \
+        --exclude='tkinter' \
+        --exclude='idlelib' \
+        --exclude='turtledemo' \
+        "$PYTHON_LIB/" "$DIST_DIR/lib/python${PYTHON_VERSION}/"
+fi
+
+# Create qt.conf for portable deployment
+cat > "$DIST_DIR/qt.conf" <<EOF
+[Paths]
+Prefix = .
+Plugins = .
+Translations = translations
+EOF
+
+echo "[5/5] Creating single-file self-extracting executable..."
+cd "$BUILD_DIR"
+rm -f "$LAUNCHER_NAME" "$PRODUCT-portable.nsi" "$OUTPUT/$OUTPUT_NAME"
+cat > "$PRODUCT-portable.nsi" <<'EOF'
+Unicode true
+SilentInstall silent
+AutoCloseWindow true
+ShowInstDetails nevershow
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+SetCompressorDictSize 64
+OutFile "@LAUNCHER_NAME@"
+Name "SLogic @DISPLAY_NAME@"
+
+!include "FileFunc.nsh"
+
+Section
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR\@DISPLAY_NAME@"
+    File /r "@PORTABLE_NAME@\*.*"
+    ${GetParameters} $R0
+    ExecWait '"$PLUGINSDIR\@DISPLAY_NAME@\@BINARY_NAME@.exe" $R0' $R1
+    SetErrorLevel $R1
+SectionEnd
+EOF
+sed -i \
+    -e "s|@LAUNCHER_NAME@|$LAUNCHER_NAME|g" \
+    -e "s|@DISPLAY_NAME@|$DISPLAY_NAME|g" \
+    -e "s|@PORTABLE_NAME@|$PORTABLE_NAME|g" \
+    -e "s|@BINARY_NAME@|$BINARY_NAME|g" \
+    "$PRODUCT-portable.nsi"
+/ucrt64/bin/makensis.exe -V2 "$PRODUCT-portable.nsi"
+
+if objdump -p "$LAUNCHER_NAME" | grep -Eqi 'DLL Name:[[:space:]]*msys-'; then
+    echo "Native Windows package unexpectedly depends on MSYS runtime" >&2
+    objdump -p "$LAUNCHER_NAME" | grep 'DLL Name' >&2
+    exit 1
+fi
+
+echo "=== Done! ==="
+ls -lh "$LAUNCHER_NAME"
+cp "$LAUNCHER_NAME" "$OUTPUT/$OUTPUT_NAME"

@@ -1,0 +1,4 @@
+name = "macos-xcode"
+executor = "native"
+description = "Native Apple Silicon Xcode and Homebrew SDK"
+

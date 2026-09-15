@@ -1,0 +1,112 @@
+#!/bin/bash
+set -euo pipefail
+
+BUILD_DIR=/c/workspace
+BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
+
+if [ "${BUILD_TYPE:-Release}" = Debug ]; then
+    export CFLAGS="-O0 -g3 ${CFLAGS:-}"
+    export CXXFLAGS="-O0 -g3 ${CXXFLAGS:-}"
+fi
+
+mkdir -p "$BUILD_DIR/tmp"
+export TMPDIR="$BUILD_DIR/tmp"
+export TMP="$BUILD_DIR/tmp"
+export TEMP="$BUILD_DIR/tmp"
+
+cd "$BUILD_DIR"
+export PATH="$BUILD_DIR/sr-win32/bin:/ucrt64/bin:$PATH"
+export PKG_CONFIG_PATH="$BUILD_DIR/sr-win32/lib/pkgconfig:/ucrt64/lib/pkgconfig"
+
+echo "Building sigrok-cli ${BUILD_TYPE:-Release} (${BUILD_JOBS} jobs) against shared prefix..."
+if [ ! -f build-win32/sigrok-cli/configure ]; then
+    mkdir -p build-win32/sigrok-cli
+    rsync -a --delete --exclude=.git --exclude=build sigrok-cli/ build-win32/sigrok-cli/
+    (cd build-win32/sigrok-cli && ./autogen.sh)
+fi
+if [ ! -f build-win32/sigrok-cli/Makefile ]; then
+    (cd build-win32/sigrok-cli && ./configure \
+        --host=x86_64-w64-mingw32 \
+        --prefix="$BUILD_DIR/sr-win32" \
+        PKG_CONFIG="pkg-config" \
+        CPPFLAGS="-I$BUILD_DIR/sr-win32/include" \
+        LDFLAGS="-L$BUILD_DIR/sr-win32/lib")
+fi
+make -C build-win32/sigrok-cli -j"$BUILD_JOBS"
+make -C build-win32/sigrok-cli -j"$BUILD_JOBS" install
+
+PORTABLE="$BUILD_DIR/sigrok-cli-SLogic-windows-x86_64-ucrt"
+rm -rf "$PORTABLE"
+mkdir -p "$PORTABLE/bin" "$PORTABLE/share"
+cp "$BUILD_DIR/sr-win32/bin/sigrok-cli.exe" "$PORTABLE/bin/"
+cp -r "$BUILD_DIR/sr-win32/share/libsigrokdecode" "$PORTABLE/share/"
+
+PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+mkdir -p "$PORTABLE/lib/python$PYTHON_VERSION"
+rsync -a --exclude='__pycache__' --exclude='test' --exclude='tests' \
+    --exclude='site-packages' --exclude='config-*' \
+    "/ucrt64/lib/python$PYTHON_VERSION/" "$PORTABLE/lib/python$PYTHON_VERSION/"
+
+# Recursively bundle all non-system dependencies of the executable, DLLs,
+# and Python extension modules. Keep DLLs beside the executable and add that
+# directory to PATH in the launcher so extension modules resolve them too.
+QUEUE=$(
+    find "$PORTABLE/bin" "$PORTABLE/lib" -type f \( -iname '*.exe' -o -iname '*.dll' -o -iname '*.pyd' \) -print0 |
+        xargs -0 -r objdump -p 2>/dev/null | awk '/DLL Name/{print $3}'
+)
+CHECKED=""
+while [ -n "$QUEUE" ]; do
+    NEXT=""
+    for dll in $QUEUE; do
+        case "${dll,,}" in
+            kernel32.dll|user32.dll|advapi32.dll|ws2_32.dll|oleaut32.dll|ole32.dll|shell32.dll|crypt32.dll|bcrypt.dll|ntdll.dll|setupapi.dll|cfgmgr32.dll|gdi32.dll|comctl32.dll|comdlg32.dll|imm32.dll|version.dll|winmm.dll|shlwapi.dll|propsys.dll|rpcrt4.dll|dnsapi.dll|iphlpapi.dll|netapi32.dll|userenv.dll|wtsapi32.dll|winhttp.dll|secur32.dll|psapi.dll|dbghelp.dll|api-ms-win-*|ucrtbase.dll) continue ;;
+        esac
+        echo "$CHECKED" | grep -Fqw "$dll" && continue
+        CHECKED="$CHECKED $dll"
+        source_dll=""
+        [ -f "$BUILD_DIR/sr-win32/bin/$dll" ] && source_dll="$BUILD_DIR/sr-win32/bin/$dll"
+        [ -n "$source_dll" ] || [ ! -f "/ucrt64/bin/$dll" ] || source_dll="/ucrt64/bin/$dll"
+        [ -n "$source_dll" ] || { echo "Missing portable DLL: $dll" >&2; exit 1; }
+        cp "$source_dll" "$PORTABLE/bin/"
+        for dep in $(objdump -p "$source_dll" 2>/dev/null | awk '/DLL Name/{print $3}'); do
+            echo "$CHECKED" | grep -Fqw "$dep" || NEXT="$NEXT $dep"
+        done
+    done
+    QUEUE="$NEXT"
+done
+
+cd "$BUILD_DIR"
+mkdir -p /c/output
+ARCHIVE="$BUILD_DIR/sigrok-cli-portable.7z"
+PAYLOAD="$BUILD_DIR/sigrok-cli-payload.exe"
+OUTPUT=/c/output/sigrok-cli-SLogic-windows-x86_64-ucrt.exe
+rm -f "$ARCHIVE" "$PAYLOAD" "$OUTPUT"
+(
+    cd "$PORTABLE"
+    /ucrt64/bin/7z.exe a -t7z -mx=9 "$ARCHIVE" . >/dev/null
+)
+cp /ucrt64/lib/7zip/7zCon.sfx "$PAYLOAD"
+cat "$ARCHIVE" >> "$PAYLOAD"
+
+PAYLOAD_ID=$(sha256sum "$PAYLOAD" | cut -c1-16)
+cat > "$BUILD_DIR/sigrok-cli-launcher-id.h" <<EOF
+#define PAYLOAD_ID L"$PAYLOAD_ID"
+EOF
+cat > "$BUILD_DIR/sigrok-cli-launcher.rc" <<'EOF'
+101 RCDATA "sigrok-cli-payload.exe"
+EOF
+cp /c/target/sigrok-cli-launcher.c "$BUILD_DIR/"
+windres "$BUILD_DIR/sigrok-cli-launcher.rc" "$BUILD_DIR/sigrok-cli-launcher-resource.o"
+gcc -O2 -municode -static -s \
+    "$BUILD_DIR/sigrok-cli-launcher.c" \
+    "$BUILD_DIR/sigrok-cli-launcher-resource.o" \
+    -o "$OUTPUT"
+
+if objdump -p "$OUTPUT" | grep -Eqi 'DLL Name:[[:space:]]*msys-'; then
+    echo "Native Windows package unexpectedly depends on MSYS runtime" >&2
+    objdump -p "$OUTPUT" | grep 'DLL Name' >&2
+    exit 1
+fi
+file "$OUTPUT"
+objdump -p "$OUTPUT" | grep 'DLL Name' || true
+sha256sum "$OUTPUT"
