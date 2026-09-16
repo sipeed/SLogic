@@ -74,12 +74,15 @@ echo "    Resolving DLL dependencies..."
 UCRT64_BIN="/ucrt64/bin"
 CHECKED=""
 QUEUE=$(for exe_file in "$DIST_DIR/$BINARY_NAME.exe"; do
-    objdump -p "$exe_file" 2>/dev/null | grep "DLL Name" | awk '{print $3}'
+    objdump -p "$exe_file" 2>/dev/null | grep "DLL Name" | awk '{print $3}' || true
 done)
 
-# Add DLLs from our built libs too
+# Add DLLs from our built libs too. A product that links its libraries
+# statically ships no DLLs of its own, so the glob may match nothing and
+# grep may see empty input; neither may kill the script under pipefail.
 for dll_file in "$DIST_DIR"/*.dll; do
-    QUEUE="$QUEUE $(objdump -p "$dll_file" 2>/dev/null | grep "DLL Name" | awk '{print $3}')"
+    [ -e "$dll_file" ] || continue
+    QUEUE="$QUEUE $(objdump -p "$dll_file" 2>/dev/null | grep "DLL Name" | awk '{print $3}' || true)"
 done
 
 # BFS resolve dependencies
