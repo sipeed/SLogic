@@ -180,16 +180,31 @@ class McpTransport(Transport):
         except OSError:
             return None
 
-    def _backpressure_since(self, offset):
+    def _log_since(self, offset):
         if self.app_log is None or offset is None:
             return None
         try:
             with open(self.app_log, "rb") as handle:
                 handle.seek(offset)
-                chunk = handle.read()
-            return b"USB link slower than the analyzer" in chunk
+                return handle.read()
         except OSError:
             return None
+
+    STREAM_DONE = re.compile(
+        rb"stream done: ([0-9.]+) MB in ([0-9.]+) s \((\d+) MB/s\), "
+        rb"[0-9.]+ MSa, host tail (\d+) ms")
+
+    def _driver_report(self, chunk):
+        """The driver's own per-capture line is the device-side truth for
+        stream time and host tail; keep it alongside our host-side view."""
+        if chunk is None:
+            return None
+        matches = self.STREAM_DONE.findall(chunk)
+        if not matches:
+            return None
+        mb, secs, rate, tail_ms = matches[-1]
+        return {"stream_mb": float(mb), "stream_s": float(secs),
+                "stream_mbps": int(rate), "host_tail_ms": int(tail_ms)}
 
     def capture(self, cell: Cell) -> RunResult:
         notes = []
@@ -238,6 +253,16 @@ class McpTransport(Transport):
             "max_ms": 1000 * latencies[-1],
         } if latencies else None
         captured_bytes = captured * unitsize(cell.channels)
+        chunk = self._log_since(log_at)
+        driver = self._driver_report(chunk)
+        if driver:
+            notes.append(f"driver: {driver['stream_mb']:.0f} MB in "
+                         f"{driver['stream_s']:.3f} s ({driver['stream_mbps']} MB/s), "
+                         f"host tail {driver['host_tail_ms']} ms")
+            stream = driver["stream_s"]
+            tail = driver["host_tail_ms"] / 1000.0
+        backpressure = (None if chunk is None
+                        else b"USB link slower than the analyzer" in chunk)
         return RunResult(
             requested_samples=cell.requested_samples,
             captured_samples=captured,
@@ -246,7 +271,7 @@ class McpTransport(Transport):
             host_tail_s=tail,
             process_cpu_s=cpu,
             wire_rate_mbps=captured_bytes / stream / 1e6,
-            backpressure=self._backpressure_since(log_at),
+            backpressure=backpressure,
             gui_latency_ms=gui,
             notes=notes,
         )
@@ -415,12 +440,15 @@ def render_table(runs):
     for k in sorted(groups):
         docs = groups[k]
         c = docs[0]["cell"]
-        walls = [d["wall_s"] for d in docs]
-        wires = [d["wire_rate_mbps"] for d in docs]
-        tails = [d["host_tail_s"] * 1000 for d in docs]
-        cpus = [d["process_cpu_s"] for d in docs]
+        # Timing statistics come from full captures only; a run that
+        # aborts after a fraction of a transfer has no meaningful rate.
+        good = [d for d in docs if d["full"]] or docs
+        walls = [d["wall_s"] for d in good]
+        wires = [d["wire_rate_mbps"] for d in good]
+        tails = [d["host_tail_s"] * 1000 for d in good]
+        cpus = [d["process_cpu_s"] for d in good]
         full = sum(1 for d in docs if d["full"])
-        gui = [d["gui_latency_ms"]["p95_ms"] for d in docs if d.get("gui_latency_ms")]
+        gui = [d["gui_latency_ms"]["p95_ms"] for d in good if d.get("gui_latency_ms")]
         bp = [d["backpressure"] for d in docs if d["backpressure"] is not None]
         sd = statistics.stdev(walls) if len(walls) > 1 else 0.0
         rate = c["samplerate_hz"] // 1_000_000
@@ -459,13 +487,21 @@ def cmd_smoke(args):
 
 
 def cmd_sweep(args):
+    # The smoke gate protects against misconfiguration, not against the
+    # known intermittent short captures: three attempts, and one full
+    # capture proves the configuration path works.
     transport = make_transport(args)
-    smoke_rc = cmd_smoke(argparse.Namespace(**{**vars(args), "repetitions": 1}))
-    if smoke_rc:
-        print("Smoke cell failed; not starting the full sweep.")
-        return smoke_rc
+    cell = Cell(SMOKE["channels"], TOP_RATE_HZ[SMOKE["channels"]],
+                SMOKE["pattern"], SMOKE["duration_s"])
+    gate_attempts = 3
+    short = run_cells(transport, [cell], gate_attempts, args.out, True)
+    if short >= gate_attempts:
+        print("Smoke cell never completed a full capture; "
+              "not starting the full sweep.")
+        return 1
     cells = list(cells_for(args.channels, args.patterns, args.durations))
-    short = run_cells(transport, cells, args.repetitions, args.out, args.keep_going)
+    short += run_cells(transport, cells, args.repetitions, args.out,
+                       args.keep_going)
     return 1 if short else 0
 
 
