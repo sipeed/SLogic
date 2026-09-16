@@ -142,15 +142,23 @@ class McpTransport(Transport):
         except Exception:
             pass
         try:
-            out = subprocess.check_output(["pgrep", "-ax", "AllLogic"], text=True)
-            return "AllLogic pid " + out.split()[0]
+            return "AllLogic pid " + str(self._pid_of_host())
         except Exception:
             return "AllLogic (version unavailable over MCP)"
 
     def _pid_of_host(self):
+        # An AppImage runs the GUI through the bundled musl loader, so the
+        # process comm is the loader name; match the command line instead.
         if self._pid is None:
-            out = subprocess.check_output(["pgrep", "-x", "AllLogic"], text=True)
-            self._pid = int(out.split()[0])
+            for pattern in (["-x", "AllLogic"], ["-f", "bin/AllLogic"]):
+                try:
+                    out = subprocess.check_output(["pgrep", *pattern], text=True)
+                    self._pid = int(out.split()[0])
+                    break
+                except subprocess.CalledProcessError:
+                    continue
+            if self._pid is None:
+                raise RuntimeError("no running ALL-LOGIC host process found")
         return self._pid
 
     def _cpu_ticks(self):
@@ -344,6 +352,7 @@ def run_cells(transport, cells, repetitions, out_dir, keep_going):
         "schema": SCHEMA,
         "transport": transport.name,
         "transport_version": transport.version(),
+        "label": getattr(transport, "label", None),
         "workspace_commit": workspace_commit(),
         "host": {
             "hostname": socket.gethostname(),
@@ -433,8 +442,12 @@ def render_table(runs):
 
 def make_transport(args):
     if args.transport == "mcp":
-        return McpTransport(url=args.mcp_url, app_log=args.app_log)
-    return SigrokCliTransport(binary=args.sigrok_cli, loglevel=args.loglevel)
+        transport = McpTransport(url=args.mcp_url, app_log=args.app_log)
+    else:
+        transport = SigrokCliTransport(binary=args.sigrok_cli,
+                                       loglevel=args.loglevel)
+    transport.label = args.label
+    return transport
 
 
 def cmd_smoke(args):
@@ -503,6 +516,9 @@ def main():
     parser.add_argument("--sigrok-cli", default="sigrok-cli",
                         help="sigrok-cli command (may include arguments)")
     parser.add_argument("--loglevel", type=int, default=2)
+    parser.add_argument("--label", default=None,
+                        help="free-form tag recorded in every run document"
+                             " (e.g. the artifact build type)")
     parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--keep-going", action="store_true",
                         help="record short captures and continue; still exit non-zero")
