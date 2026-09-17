@@ -1,6 +1,7 @@
 # SLogic USB protocol: the canonical `libslogic` specification
 
-Status: proposed, 2026-09-17.
+Status: proposed, 2026-09-17 (revised the same day after a conformance audit of
+both drivers — see section 6 for the drift points the audit surfaced).
 
 This document is the single source of truth for how the host talks to a Sipeed
 SLogic analyzer over USB — device model, control protocol, and the raw data
@@ -33,8 +34,9 @@ this spec resolves its section 8 open decision #1) and
 | SLogic16U3     | 0x359F | 0x3031 | 0x82 | 16 | 3200 MHz·ch  |
 | SLogic32U3     | 0x359F | 0x3032 | 0x82 | 32 | 6400 MHz·ch  |
 
-DFU/bootloader PID is `0x30f1` (a distinct device; `libslogic` does not handle
-firmware update). The Combo 8 speaks a small command protocol; the two U3
+The DFU/bootloader PID is `0x30f1` (external knowledge — it is not referenced by
+either driver, which do not handle firmware update, and neither does
+`libslogic`). The Combo 8 speaks a small command protocol; the two U3
 models share one register/AUX protocol (`SLOGIC_PROTO_U3`).
 
 Interface 0 is claimed; there is one bulk IN endpoint and the vendor control
@@ -54,15 +56,21 @@ array order (section 6.1); the pairs themselves are identical.
 
 Combo 8: 2 ch → 160 MHz, 4 ch → 80 MHz, 8 ch → 40 MHz.
 
-On Windows the U3 ceilings are held one notch lower (16U3: 400/200/100;
+On Windows the **16U3** ceilings are held one notch lower (400/200/100;
 `_WIN32` guard in both front ends) because the Windows USB stack cannot sustain
-the top rate. `libslogic` exposes both the native and the Windows-capped table
-and lets the adapter pick per build.
+the top rate. The 32U3 table has no `_WIN32` variant in either driver — it stays
+1600/800/400/200 on Windows. `libslogic` exposes both the native and the
+Windows-capped 16U3 table and lets the adapter pick per build.
 
 The advertised discrete samplerate list per model is the sorted set of
 `SR_MHZ(n)` values in `samplerates_slogic16u3` / `_slogic32u3` /
-`_slogiccombo8`; a requested rate is snapped to the nearest advertised rate not
-exceeding the channel-mode ceiling.
+`_slogiccombo8`. How a requested rate resolves to one of them differs between
+the two front ends and stays adapter-side (section 6.8): all-logic snaps to the
+nearest advertised rate not exceeding the ceiling; libsigrok requires an exact
+table hit and otherwise wraps to the ceiling. all-logic also applies a runtime
+cap of `320 MHz / channel_count` whenever a U3 link enumerates below USB 3.0
+(`slogic_link_max_rate`), a real USB2 payload limit that libsigrok lacks and
+that `libslogic` adopts.
 
 ---
 
@@ -85,7 +93,7 @@ timeout       = 500 ms
 | Register | Addr   | Meaning                                    |
 |----------|--------|--------------------------------------------|
 | R32_CTRL | 0x0004 | bit0 = RUN, bit1 = RST (write 0 = STOP)    |
-| R32_FLAG | 0x0008 | status flags (read; unused by both drivers) |
+| (0x0008) | 0x0008 | `#define`d in libsigrok but never accessed; absent from all-logic; no known meaning |
 | R32_AUX  | 0x000C | AUX mailbox header                         |
 | —        | 0x0010 | AUX mailbox payload (`R32_AUX + 4`)        |
 
@@ -106,7 +114,9 @@ Configuration goes through a mailbox at `R32_AUX`. One transaction:
 3. **Payload length** in words comes from the header: `n = (header & 0xFFFF) >> 9`.
 4. **Read the payload** from `R32_AUX + 4` (0x10), `n` words.
 5. **Modify and write back** the payload to `R32_AUX + 4`.
-6. **Read back** to confirm.
+6. **Read back** to confirm — libsigrok does this after the channel/rate/vref
+   writes; all-logic reads back only inside the samplerate search. Canonical
+   keeps the confirm on every block (section 6.7).
 
 ### Per-command payload semantics
 
@@ -116,10 +126,12 @@ Configuration goes through a mailbox at `R32_AUX`. One transaction:
   [uint32 divider]`. Walk `base_idx` until a base is found with
   `base_mhz*1e6 % want == 0`; on a miss, increment `base_idx`, write it back
   (4 bytes), and re-read. On a hit, write `divider = base/want - 1`.
-- **Vref / threshold (cmd 3):** payload word 0 = DAC code.
-  `dac = round(V / 3.33 / 2 * 1024)` (~10-bit against a 1.6 V reference).
-  `V` is the mean of the two threshold values (both front ends drive a single
-  averaged threshold today; the dual value is a libsigrok API artifact).
+- **Vref / threshold (cmd 3):** payload word 0 = DAC code,
+  `dac = V / 3.33 / 2 * 1024` (~10-bit against a 1.6 V reference). The drivers
+  differ on the final cast (section 6.6): all-logic rounds (`+ 0.5`), libsigrok
+  truncates, so codes differ by one at fractional thresholds. `V` is a single
+  threshold in all-logic; libsigrok averages its two-value threshold API into
+  one `V` first (the dual value is a libsigrok API artifact).
 - **Test mode (cmd 5):** payload word 0 = mode. `0 = Normal`,
   `1 = USB connection test` (max-speed pattern), `2 = Emulation` (structured
   pattern generator). Selecting Normal on the U3 also issues an RST.
@@ -168,12 +180,17 @@ The first 4 bytes of the stream are a hardware artifact and must be dropped
 counter initialised to 4, decremented across however many transfers it takes to
 consume 4 bytes (section 6.3).
 
-### Transfer sizing
+### Transfer sizing (drift — section 6.5)
 
-Target one transfer ≈ a few hundred ms of data, aligned up to 32 KiB, with a
-ring of up to 16 (`NUM_MAX_TRANSFERS = 16`). The reference sizing aims for
-250 ms of data then quarters it so ≥ 4 transfers stay in flight; the bounds are
-`[32 KiB, 3 MiB]`. Expected byte rate = `samplerate * channel_count / 8`.
+A ring of up to 16 transfers (`NUM_MAX_TRANSFERS`), 32 KiB alignment, expected
+byte rate = `samplerate * channel_count / 8`. The per-transfer *size* differs
+sharply between the two drivers and is **not** yet canonical:
+
+- **libsigrok** probes a 250 ms buffer, aligns to 32 KiB, then quarters it
+  (`>>= 2`) so ≥ 4 stay in flight (~62 ms each). No fixed upper cap — bounded
+  only by whether the probe `malloc` succeeds (~200 MB at 800 MB/s).
+- **all-logic** targets ~4 ms (`rate * 4 / 1000`) clamped to `[32 KiB, 3 MiB]`,
+  with no quartering.
 
 ### Stall / completion policy (canonical: section 6.2)
 
@@ -285,15 +302,22 @@ presents them in whatever order its UI/config layer wants. The drift dissolves.
 
 ### 6.2 Stall policy — RESOLVED toward all-logic, pending baseline sign-off
 
-libsigrok treats a slow transfer as fatal on *every* transfer, which truncates
-long captures whenever the host is the bottleneck (observed: a 4 s request
-ending at 621 MSa; and 32 false timeouts in the Phase 0 sweep). all-logic
-reconciled this: rate-watchdog gates only the *never-started* case (+ one RUN
-re-arm), and *mid-stream* only 1 s of complete silence is fatal. **Canonical:**
-the all-logic reconciled policy (section 3). For libsigrok this is a behaviour
-*improvement*, but libsigrok is release-pinned, so the migration keeps its
-current rule until the conformance vectors and the Phase 0 baseline confirm the
-new policy does not mask a real stall.
+Both drivers abort only after `timeout_count >= timeout_count_limit`
+*consecutive* slow transfers (limit = number of submitted transfers). libsigrok
+counts a transfer slow when it runs long, or actual rate < 0.7×expected, **or
+average rate < 0.95×expected** (`protocol.c:151-176`), and never resets the
+counter once data is flowing — so a sustained-but-alive stream under host
+backpressure trips the average-rate trigger and truncates the capture (observed:
+a 4 s request ending at 621 MSa; 32 false timeouts in the Phase 0 sweep).
+all-logic keeps the same counter but resets it whenever bytes have arrived
+(`raw_received_bytes > 0`), so mid-stream only 1 s of *complete* silence
+(`SLOGIC_STREAM_IDLE_US`) is fatal, and it re-arms RUN once if the stream never
+started. The real difference is the missing `raw_received_bytes > 0` reset, not
+that a single slow transfer is fatal. **Canonical:** the all-logic policy
+(section 3). For libsigrok this is a behaviour *improvement*, but it is
+release-pinned, so the migration keeps its current rule until the conformance
+vectors and the Phase 0 baseline confirm the new policy does not mask a real
+stall.
 
 ### 6.3 First-4-byte drop — RESOLVED toward all-logic
 
@@ -305,32 +329,67 @@ a pathologically short first transfer. **Canonical:** the `drop_left` counter.
 
 libsigrok retries 6, all-logic 8. **Canonical:** 8 (harmless headroom).
 
-### 6.5 Transfer sizing math — RESOLVED
+### 6.5 Transfer sizing — OPEN (settle against the Phase 0 baseline)
 
-Keep the reference "250 ms then quarter, 32 KiB aligned, ≤ 16 in flight,
-`[32 KiB, 3 MiB]`" (section 3). Any change is measured against the baseline
-before landing.
+The two drivers size transfers by incompatible strategies (section 3):
+libsigrok's 250 ms-probe-then-quarter (~62 ms, no upper cap) versus all-logic's
+~4 ms target clamped to `[32 KiB, 3 MiB]`. Both keep ≤ 16 in flight. This is a
+throughput knob (Phase 1 territory), so `libslogic` does not pre-pick a winner:
+it exposes the sizing as a parameter and the choice is measured against
+`slogic-capture-baseline.md` before it is frozen.
+
+### 6.6 VTH→DAC rounding — RESOLVED toward round
+
+`dac = V / 3.33 / 2 * 1024`; all-logic rounds (`+ 0.5`), libsigrok truncates.
+**Canonical:** round. The vref conformance vector therefore differs from the
+release-pinned libsigrok by at most one DAC code at fractional thresholds; the
+libsigrok adapter tolerates that ±1 until its side adopts the core.
+
+### 6.7 AUX confirm read-back and config ordering — RESOLVED
+
+The two drivers emit the same register *writes* but not the same *sequence*.
+libsigrok applies the pattern (AUX cmd 5) at config-set time, before the start
+block, and confirms every AUX write with a read-back; all-logic applies the
+pattern last (after vref, before RUN) and skips the confirm read except in the
+samplerate search. The AUX blocks are independent config registers, so both
+orderings work on hardware. **Canonical:** one `slogic_configure` issuing
+channel → samplerate → vref → pattern in that fixed order, each block confirmed
+with a read-back, then `CTRL=RUN`. libsigrok's vref confirm compares the
+read-back against a hard-coded `1024` (`api.c:1154`) and so always logs a false
+"Failed to configure vref"; the canonical compares against the value written.
+
+### 6.8 Samplerate resolution and the USB2 cap
+
+Requested-rate resolution differs (all-logic snaps to nearest ≤ ceiling;
+libsigrok requires an exact hit or wraps to the ceiling) and stays adapter-side
+(config surface, section 5). all-logic's runtime `320 MHz / nch` cap for U3
+links below USB 3.0 is real and **canonical** — `libslogic` applies it; the
+libsigrok side gains it on adoption.
 
 ---
 
 ## 7. Conformance vectors
 
 The copies only stay honest if a mechanical check proves `libslogic` reproduces
-the known-good wire behaviour byte-for-byte. Two layers:
+the known-good wire behaviour. Two layers, both now scaffolded from today's
+drivers:
 
-1. **Control-sequence vectors.** For each `(model, config)` a golden trace of
-   the exact control transfers `(bRequest, wValue, wIndex, data[4])` the
-   configure/run/stop sequence emits. Generated by running `libslogic` against
-   the **mock transport** (no hardware) and captured; regenerated from a real
-   device with the driver's `-l4`/`sr_dbg` register trace to anchor the golden
-   set. A byte diff fails the check.
-2. **Packing vectors.** For each channel mode, a raw wire buffer plus the
-   sample-major decode `libslogic` guarantees; the adapter reshape is then
-   tested separately per host. These extend the Phase 0 harness
+1. **Control-sequence vectors** — `build/bench/slogic_control_vectors.py`. The
+   canonical ordered control transfers `(op, wValue, data[4])` for
+   configure/run/stop, with device-dependent fields (header-poll counts, the
+   samplerate base table, payload lengths) marked as wildcards a comparator
+   ignores, plus the two observed per-driver divergences — pattern-block
+   ordering and the confirm read-backs (section 6.7). A captured register trace
+   (`-l4`/`sr_dbg` or a libusb shim) diffs against the canonical set.
+2. **Packing vectors** — `build/bench/slogic_pack_ref.py`. A pure reference
+   decoder of the sample-major wire format for all five channel modes with
+   hand-checkable vectors (4 ch sample 0 = low nibble; 16/32 ch little-endian).
+   Both drivers were confirmed to decode identically before their (different)
+   reshape. To be wired into the Phase 0 harness
    (`build/bench/capture_bench.py`) `verify` subcommand.
 
-The extraction sequence (see plan section 8): freeze this spec → build the
-vectors from today's drivers → extract `libslogic` to satisfy them → port the
-libsigrok adapter first (simpler data path, vectors must stay byte-identical
-since it is release-pinned) → port the all-logic adapter → then land Phase 1
-buffer-pooling once, in the core.
+Both files self-check on run. The extraction sequence (see plan section 8):
+freeze this spec → these vectors are the baseline → extract `libslogic` to
+satisfy them → port the libsigrok adapter first (release-pinned; it stays within
+the documented ±1 DAC and AUX-ordering tolerances) → port the all-logic adapter
+→ then land Phase 1 buffer-pooling once, in the core.
