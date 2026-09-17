@@ -218,6 +218,7 @@ cat > "$BUILD_ROOT/gui-launcher.c" <<'EOF'
 #endif
 int main(int argc, char **argv) {
     char path[PATH_MAX], root[PATH_MAX], target[PATH_MAX], python[PATH_MAX];
+    char decoders[PATH_MAX];
     uint32_t size = sizeof(path);
     if (_NSGetExecutablePath(path, &size) != 0) return 126;
     char *slash = strrchr(path, '/');
@@ -226,8 +227,14 @@ int main(int argc, char **argv) {
     if (!realpath(path, root)) return 126;
     snprintf(target, sizeof(target), "%s/%s", root, GUI_BINARY);
     snprintf(python, sizeof(python), "%s/%s", root, PYTHON_HOME_REL);
+    /* libsigrokdecode's compiled-in DECODERS_DIR names the build prefix,
+     * which does not exist on user machines; point it at the bundled
+     * copy, as the Linux AppRun and the CLI wrapper already do. */
+    snprintf(decoders, sizeof(decoders),
+             "%s/../Resources/libsigrokdecode/decoders", root);
     setenv("PYTHONHOME", python, 1);
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+    setenv("SIGROKDECODE_DIR", decoders, 1);
     execv(target, argv);
     return 126;
 }
