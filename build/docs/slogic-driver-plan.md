@@ -200,10 +200,15 @@ Offer each side what the other has:
 
 ## 8. Open decisions
 
-1. Single source of truth: extract a shared protocol/decision core with two
-   data-shaping adapters, or keep two implementations and hold them together
-   with a spec plus conformance vectors. Recommendation: spec and vectors
-   first, evaluate extraction after Phase 2.
+1. Single source of truth: RESOLVED (2026-09-17, user decision) toward
+   extraction — a shared `libslogic` source folder (USB data + control) that
+   both front ends vendor a copy of, adapted with a thin porting layer, with
+   the two data-shaping paths staying as adapters. The canonical protocol,
+   drift resolutions, `libslogic` C API, and conformance-vector definition are
+   specified in `slogic-protocol.md`. Sequence: freeze the spec → build
+   conformance vectors from today's drivers → extract `libslogic` → port the
+   libsigrok adapter first (byte-identical, release-pinned) → port the
+   all-logic adapter → land Phase 1 buffer-pooling once in the core.
 2. Where the harness lives: under `build/scripts/` next to the existing
    orchestration, or a new top-level development directory.
 3. Who lands the `libsigrok` side of Phase 3: this workspace directly, or
