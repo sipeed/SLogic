@@ -250,3 +250,296 @@ slogic_verdict slogic_stream_watch(slogic_stream *s, size_t got_bytes,
 	}
 	return SLOGIC_STREAM_OK;
 }
+
+/* -------------------- register / AUX control path -------------------- */
+/*
+ * Verified against build/bench/slogic_control_vectors.py: the canonical
+ * configure sequence is CTRL=STOP, then AUX channel/samplerate/vref/pattern in
+ * that fixed order each with a confirm read-back (section 6.7), then CTRL=RUN.
+ */
+
+#define REQ_REG_READ     0x00
+#define REQ_REG_WRITE    0x01
+#define R_CTRL           0x0004
+#define R_AUX            0x000c
+#define R_AUX_PAYLOAD    0x0010 /* R_AUX + 4 */
+#define CTRL_STOP        UINT32_C(0x00000000)
+#define CTRL_RUN         UINT32_C(0x00000001)
+#define CTRL_RST         UINT32_C(0x00000002)
+#define AUX_CMD_CHANNEL  UINT32_C(0x00000001)
+#define AUX_CMD_RATE     UINT32_C(0x00000002)
+#define AUX_CMD_VREF     UINT32_C(0x00000003)
+#define AUX_CMD_TEST     UINT32_C(0x00000005)
+#define COMBO8_CMD_START 0xb1
+#define CTRL_TIMEOUT_MS  500
+#define AUX_POLL_RETRIES 8
+
+static int ctrl_write(const slogic_transport *t, uint16_t addr,
+		      const uint8_t *data, size_t len)
+{
+	size_t i;
+
+	len = (len + 3) & ~(size_t)3;
+	for (i = 0; i < len; i += 4) {
+		int r = t->control_write(t->ctx, REQ_REG_WRITE,
+					 (uint16_t)(addr + i), 0, data + i, 4,
+					 CTRL_TIMEOUT_MS);
+		if (r < 0)
+			return SLOGIC_ERR_IO;
+	}
+	return SLOGIC_OK;
+}
+
+static int ctrl_read(const slogic_transport *t, uint16_t addr, uint8_t *data,
+		     size_t len)
+{
+	size_t i;
+
+	len = (len + 3) & ~(size_t)3;
+	for (i = 0; i < len; i += 4) {
+		int r = t->control_read(t->ctx, REQ_REG_READ,
+					(uint16_t)(addr + i), 0, data + i, 4,
+					CTRL_TIMEOUT_MS);
+		if (r < 0)
+			return SLOGIC_ERR_IO;
+	}
+	return SLOGIC_OK;
+}
+
+static int wr32(const slogic_transport *t, uint16_t addr, uint32_t v)
+{
+	uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16),
+			 (uint8_t)(v >> 24) };
+	return ctrl_write(t, addr, b, 4);
+}
+
+/*
+ * Begin one AUX transaction: write the command word, poll the header until its
+ * ready bit sets, and read the payload. Returns the payload byte length in *n.
+ */
+static int aux_begin(const slogic_transport *t, uint32_t cmd, uint8_t *pay,
+		     size_t cap, size_t *n)
+{
+	uint32_t h = 0;
+	int retry, r;
+	size_t len;
+	uint8_t hb[4];
+
+	r = wr32(t, R_AUX, cmd);
+	if (r)
+		return r;
+	for (retry = 0; retry < AUX_POLL_RETRIES; retry++) {
+		r = ctrl_read(t, R_AUX, hb, 4);
+		if (r)
+			return r;
+		h = (uint32_t)hb[0] | ((uint32_t)hb[1] << 8) |
+		    ((uint32_t)hb[2] << 16) | ((uint32_t)hb[3] << 24);
+		if ((h >> 16) & 1u)
+			break;
+	}
+	if (!((h >> 16) & 1u))
+		return SLOGIC_ERR_TIMEOUT;
+
+	len = (size_t)((h & 0xffffu) >> 9);
+	if (len & 3)
+		len = (len + 3) & ~(size_t)3;
+	if (len == 0)
+		len = 4;
+	if (len > cap)
+		len = cap & ~(size_t)3;
+	memset(pay, 0, cap);
+	r = ctrl_read(t, R_AUX_PAYLOAD, pay, len);
+	if (r)
+		return r;
+	if (n)
+		*n = len;
+	return SLOGIC_OK;
+}
+
+/* Write the payload back and confirm with a read-back (canonical, section 6.7). */
+static int aux_write_confirm(const slogic_transport *t, uint8_t *pay, size_t n)
+{
+	int r;
+
+	if (n & 3)
+		n = (n + 3) & ~(size_t)3;
+	r = ctrl_write(t, R_AUX_PAYLOAD, pay, n);
+	if (r)
+		return r;
+	return ctrl_read(t, R_AUX_PAYLOAD, pay, n);
+}
+
+static uint32_t vth_to_dac(double v)
+{
+	if (v < 0.0)
+		v = 0.0;
+	if (v > 6.0)
+		v = 6.0;
+	/* Canonical rounds (section 6.6): dac = V / 3.33 / 2 * 1024, rounded. */
+	return (uint32_t)(v / 3.33 / 2.0 * 1024.0 + 0.5);
+}
+
+static int aux_channel(const slogic_transport *t, int nch)
+{
+	uint8_t pay[16];
+	size_t n = 0;
+	uint32_t mask;
+	int r;
+
+	mask = (nch >= 32) ? UINT32_C(0xffffffff) :
+	       (nch <= 0)  ? 0u : ((UINT32_C(1) << nch) - 1u);
+	r = aux_begin(t, AUX_CMD_CHANNEL, pay, sizeof(pay), &n);
+	if (r)
+		return r;
+	pay[0] = (uint8_t)mask;
+	pay[1] = (uint8_t)(mask >> 8);
+	pay[2] = (uint8_t)(mask >> 16);
+	pay[3] = (uint8_t)(mask >> 24);
+	if (n < 4)
+		n = 4;
+	return aux_write_confirm(t, pay, n);
+}
+
+static int aux_rate(const slogic_transport *t, uint64_t want)
+{
+	uint8_t pay[16];
+	size_t n = 0;
+	int tries, r;
+
+	if (want == 0)
+		return SLOGIC_ERR_ARG;
+	r = aux_begin(t, AUX_CMD_RATE, pay, sizeof(pay), &n);
+	if (r)
+		return r;
+	if (n < 8)
+		n = 8;
+	for (tries = 0; tries < 8; tries++) {
+		uint16_t idx = (uint16_t)(pay[0] | (pay[1] << 8));
+		uint16_t base_mhz = (uint16_t)(pay[2] | (pay[3] << 8));
+		uint64_t base = (uint64_t)base_mhz * UINT64_C(1000000);
+		uint32_t divm1;
+
+		if (base == 0)
+			return SLOGIC_ERR;
+		if (base % want != 0) {
+			/* Wrong base: bump the index and re-read the next one. */
+			idx++;
+			pay[0] = (uint8_t)idx;
+			pay[1] = (uint8_t)(idx >> 8);
+			r = ctrl_write(t, R_AUX_PAYLOAD, pay, 4);
+			if (r)
+				return r;
+			r = ctrl_read(t, R_AUX_PAYLOAD, pay, n);
+			if (r)
+				return r;
+			continue;
+		}
+		divm1 = (uint32_t)(base / want - 1);
+		pay[4] = (uint8_t)divm1;
+		pay[5] = (uint8_t)(divm1 >> 8);
+		pay[6] = (uint8_t)(divm1 >> 16);
+		pay[7] = (uint8_t)(divm1 >> 24);
+		return aux_write_confirm(t, pay, n);
+	}
+	return SLOGIC_ERR;
+}
+
+static int aux_vref(const slogic_transport *t, double v)
+{
+	uint8_t pay[16];
+	size_t n = 0;
+	uint32_t dac = vth_to_dac(v);
+	int r;
+
+	r = aux_begin(t, AUX_CMD_VREF, pay, sizeof(pay), &n);
+	if (r)
+		return r;
+	pay[0] = (uint8_t)dac;
+	pay[1] = (uint8_t)(dac >> 8);
+	pay[2] = (uint8_t)(dac >> 16);
+	pay[3] = (uint8_t)(dac >> 24);
+	if (n < 4)
+		n = 4;
+	return aux_write_confirm(t, pay, n);
+}
+
+static int aux_test(const slogic_transport *t, uint32_t mode)
+{
+	uint8_t pay[16];
+	size_t n = 0;
+	int r;
+
+	r = aux_begin(t, AUX_CMD_TEST, pay, sizeof(pay), &n);
+	if (r)
+		return r;
+	pay[0] = (uint8_t)mode;
+	pay[1] = (uint8_t)(mode >> 8);
+	pay[2] = (uint8_t)(mode >> 16);
+	pay[3] = (uint8_t)(mode >> 24);
+	if (n < 4)
+		n = 4;
+	return aux_write_confirm(t, pay, n);
+}
+
+int slogic_reset(const slogic_model *m, const slogic_transport *t)
+{
+	int r;
+
+	if (!m || !t)
+		return SLOGIC_ERR_ARG;
+	if (m->proto == SLOGIC_PROTO_COMBO8)
+		return SLOGIC_OK;
+	r = wr32(t, R_CTRL, CTRL_RST);
+	if (r)
+		return r;
+	return wr32(t, R_CTRL, CTRL_STOP);
+}
+
+int slogic_configure(const slogic_model *m, const slogic_transport *t,
+		     const slogic_config *c)
+{
+	int r;
+
+	if (!m || !t || !c)
+		return SLOGIC_ERR_ARG;
+	if (m->proto == SLOGIC_PROTO_COMBO8)
+		return SLOGIC_OK; /* config carried in the CMD_START at run */
+	/* Pre-arm stopped, then the four config blocks in canonical order. */
+	r = wr32(t, R_CTRL, CTRL_STOP);
+	if (r)
+		return r;
+	if ((r = aux_channel(t, c->channel_count)))
+		return r;
+	if ((r = aux_rate(t, c->samplerate_hz)))
+		return r;
+	if ((r = aux_vref(t, c->threshold_v)))
+		return r;
+	if ((r = aux_test(t, (uint32_t)c->pattern_mode)))
+		return r;
+	return SLOGIC_OK;
+}
+
+int slogic_run(const slogic_model *m, const slogic_transport *t,
+	       const slogic_config *c)
+{
+	if (!m || !t || !c)
+		return SLOGIC_ERR_ARG;
+	if (m->proto == SLOGIC_PROTO_COMBO8) {
+		uint16_t mhz = (uint16_t)(c->samplerate_hz / UINT64_C(1000000));
+		uint8_t cmd[4] = { (uint8_t)mhz, (uint8_t)(mhz >> 8),
+				   (uint8_t)c->channel_count, 0 };
+		int r = t->control_write(t->ctx, COMBO8_CMD_START, 0, 0, cmd,
+					 (uint16_t)sizeof(cmd), CTRL_TIMEOUT_MS);
+		return (r < 0) ? SLOGIC_ERR_IO : SLOGIC_OK;
+	}
+	return wr32(t, R_CTRL, CTRL_RUN);
+}
+
+int slogic_stop(const slogic_model *m, const slogic_transport *t)
+{
+	if (!m || !t)
+		return SLOGIC_ERR_ARG;
+	if (m->proto == SLOGIC_PROTO_COMBO8)
+		return SLOGIC_OK; /* no reliable stop; adapter drains the EP */
+	return wr32(t, R_CTRL, CTRL_STOP);
+}

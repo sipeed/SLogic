@@ -72,8 +72,9 @@ enum {
  *
  * control_write/control_read move one 4-byte register word at a time; they
  * return the number of bytes transferred (>= 0) or a negative libusb-style
- * error. bRequest is SLOGIC_REQ_REG_READ/WRITE, wValue the register address,
- * wIndex is always 0.
+ * error. b_request is the register read/write code (0x00/0x01), w_value the
+ * register address, w_index always 0. (Combo 8's start command reuses
+ * control_write with b_request 0xb1 and a single 4-byte payload.)
  */
 typedef struct slogic_transport {
 	void *ctx;
@@ -138,15 +139,20 @@ typedef struct slogic_config {
 
 /*
  * Control path. Each issues the register/AUX transactions of protocol.md
- * sections 2/2b through the transport. slogic_configure applies channel mask,
- * samplerate, threshold, and pattern in the canonical fixed order (section 6.7),
- * each block confirmed with a read-back; it does NOT write RUN. Call
- * slogic_run() to start streaming, slogic_stop() to stop.
+ * sections 2/2b through the transport. slogic_configure pre-arms with CTRL=STOP
+ * then applies channel mask, samplerate, threshold, and pattern in the
+ * canonical fixed order (section 6.7), each block confirmed with a read-back;
+ * it does NOT write RUN. slogic_run starts streaming — it takes the config
+ * because Combo 8 carries rate and channel count in its start command; the U3
+ * models ignore it and just write CTRL=RUN. slogic_stop stops the U3 models
+ * with CTRL=STOP; Combo 8 has no reliable stop command, so its adapter drains
+ * the bulk endpoint instead, and slogic_configure is a no-op on Combo 8.
  */
 int slogic_reset(const slogic_model *m, const slogic_transport *t);
 int slogic_configure(const slogic_model *m, const slogic_transport *t,
 		     const slogic_config *c);
-int slogic_run(const slogic_model *m, const slogic_transport *t);
+int slogic_run(const slogic_model *m, const slogic_transport *t,
+	       const slogic_config *c);
 int slogic_stop(const slogic_model *m, const slogic_transport *t);
 
 /* ---- transfer planning (protocol.md section 3) ---- */
