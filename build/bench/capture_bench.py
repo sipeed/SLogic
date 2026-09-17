@@ -26,7 +26,9 @@ import os
 import platform
 import re
 import resource
+import select
 import shlex
+import signal
 import socket
 import statistics
 import subprocess
@@ -309,13 +311,29 @@ class SigrokCliTransport(Transport):
         ]
         usage0 = resource.getrusage(resource.RUSAGE_CHILDREN)
         t0 = time.monotonic()
+        # A stalled capture can block forever without delivering EOF (seen
+        # after a host hot-plug storm); run the CLI in its own process
+        # group and kill the whole group when the stream goes idle. The
+        # AppImage wrapper is a separate process from the inner CLI, so a
+        # single kill on the direct child is not enough.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, bufsize=0)
+                                stderr=subprocess.PIPE, bufsize=0,
+                                start_new_session=True)
+        idle_timeout = cell.duration_s * 4 + 30
         total = 0
         t_first = t_last = None
         buf = bytearray(8 * 1024 * 1024)
         view = memoryview(buf)
         while True:
+            ready, _, _ = select.select([proc.stdout], [], [], idle_timeout)
+            if not ready:
+                notes.append(f"watchdog: no data for {idle_timeout}s, "
+                             "killing the capture process group")
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                break
             n = proc.stdout.readinto(view)
             if not n:
                 break
@@ -389,6 +407,9 @@ def run_cells(transport, cells, repetitions, out_dir, keep_going):
     for cell in cells:
         for rep in range(1, repetitions + 1):
             tag = re.sub(r"[^A-Za-z0-9]+", "-", cell.label()).strip("-")
+            path = os.path.join(out_dir, f"{transport.name}-{tag}-r{rep:02d}.json")
+            if os.path.exists(path):
+                continue  # resume: this run is already recorded
             print(f"[{transport.name}] {cell.label()} rep {rep}/{repetitions} ...",
                   end=" ", flush=True)
             result = transport.capture(cell)
@@ -402,7 +423,6 @@ def run_cells(transport, cells, repetitions, out_dir, keep_going):
                 **dataclasses.asdict(result),
                 "full": full,
             }
-            path = os.path.join(out_dir, f"{transport.name}-{tag}-r{rep:02d}.json")
             with open(path, "w") as handle:
                 json.dump(record, handle, indent=1)
             print(f"samples={result.captured_samples}/{result.requested_samples} "
