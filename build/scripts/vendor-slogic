@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Vendor the shared libslogic core into each driver front end.
+
+The canonical source lives at the workspace top-level `slogic/`. Both drivers
+carry a byte-identical copy under their own hardware directory and adapt it with
+a thin porting layer, so the USB protocol has exactly one implementation
+(build/docs/slogic-protocol.md, plan decision #1).
+
+    vendor-slogic sync    copy the canonical sources into each driver (default)
+    vendor-slogic check   verify every vendored copy is byte-identical; used by
+                          CI and pre-commit to catch a copy that drifted
+
+Only the core sources are vendored; slogic_selftest.c is a host test and stays
+at the top level.
+"""
+
+from __future__ import annotations
+
+import argparse
+import filecmp
+from pathlib import Path
+import shutil
+import sys
+
+# Files that make up the vendored core (the self-test is intentionally omitted).
+CORE_FILES = ["slogic.h", "slogic.c", "slogic16u3.c", "slogic32u3.c"]
+
+# Where each front end keeps its copy, relative to the workspace root.
+DEST_DIRS = [
+    "sources/libsigrok/src/hardware/sipeed-slogic-analyzer/slogic",
+    "sources/all-logic/libsigrok4DSL/hardware/sipeed-slogic/slogic",
+]
+
+ROOT = Path(__file__).resolve().parents[2]
+CANONICAL = ROOT / "slogic"
+
+
+def sync() -> int:
+    for rel in DEST_DIRS:
+        dest = ROOT / rel
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in CORE_FILES:
+            shutil.copy2(CANONICAL / name, dest / name)
+        print(f"vendored {len(CORE_FILES)} files -> {rel}")
+    return 0
+
+
+def check() -> int:
+    drift = []
+    for rel in DEST_DIRS:
+        dest = ROOT / rel
+        for name in CORE_FILES:
+            src = CANONICAL / name
+            copy = dest / name
+            if not copy.exists():
+                drift.append(f"{rel}/{name}: missing (run: vendor-slogic sync)")
+            elif not filecmp.cmp(src, copy, shallow=False):
+                drift.append(f"{rel}/{name}: differs from canonical slogic/{name}")
+    if drift:
+        print("libslogic vendored copies are out of sync:", file=sys.stderr)
+        for line in drift:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    print(f"all {len(CORE_FILES) * len(DEST_DIRS)} vendored copies match canonical")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("action", nargs="?", default="sync",
+                        choices=["sync", "check"])
+    args = parser.parse_args()
+    return sync() if args.action == "sync" else check()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
