@@ -23,7 +23,7 @@ import shutil
 import sys
 
 # Files that make up the vendored core (the self-test is intentionally omitted).
-CORE_FILES = ["slogic.h", "slogic.c", "slogic16u3.c", "slogic32u3.c"]
+CORE_FILES = ["slogic.h", "slogic.c", "slogic8u2.c", "slogic16u3.c", "slogic32u3.c"]
 
 # Where each front end keeps its copy, relative to the workspace root.
 DEST_DIRS = [
