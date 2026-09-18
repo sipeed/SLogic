@@ -113,7 +113,6 @@ typedef struct slogic_model {
 	const uint64_t *rates;      /* advertised discrete rates, ascending */
 	size_t rate_count;
 	const slogic_rate_limit *limits;     /* native channel->max_rate table */
-	const slogic_rate_limit *limits_win; /* Windows-capped variant, or NULL */
 	size_t limit_count;
 } slogic_model;
 
@@ -122,11 +121,12 @@ const slogic_model *slogic_model_for_pid(uint16_t pid);
 const slogic_model *const *slogic_models(size_t *count);
 
 /*
- * Highest samplerate allowed for `channel_count` under this model. `windows`
- * selects the Windows-capped table where the model has one. Returns 0 if the
- * channel count is not a supported mode.
+ * Highest samplerate allowed for `channel_count` under this model, or 0 if the
+ * channel count is not a supported mode. This is the native hardware ceiling;
+ * a host that cannot sustain it at the top rate (e.g. the Windows USB stack)
+ * leaves picking a lower rate to the user rather than capping it here.
  */
-uint64_t slogic_max_rate(const slogic_model *m, int channel_count, int windows);
+uint64_t slogic_max_rate(const slogic_model *m, int channel_count);
 
 /* ---- capture configuration ---- */
 typedef struct slogic_config {
@@ -134,7 +134,6 @@ typedef struct slogic_config {
 	uint64_t samplerate_hz;
 	double threshold_v;
 	int pattern_mode;       /* SLOGIC_PATTERN_* */
-	int windows_capped;     /* pick the Windows ceiling table */
 } slogic_config;
 
 /*

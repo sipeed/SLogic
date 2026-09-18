@@ -56,11 +56,12 @@ array order (section 6.1); the pairs themselves are identical.
 
 Combo 8: 2 ch → 160 MHz, 4 ch → 80 MHz, 8 ch → 40 MHz.
 
-On Windows the **16U3** ceilings are held one notch lower (400/200/100;
-`_WIN32` guard in both front ends) because the Windows USB stack cannot sustain
-the top rate. The 32U3 table has no `_WIN32` variant in either driver — it stays
-1600/800/400/200 on Windows. `libslogic` exposes both the native and the
-Windows-capped 16U3 table and lets the adapter pick per build.
+The two front ends currently hold the **16U3** ceilings one notch lower on
+Windows (400/200/100; a `_WIN32` guard) because the Windows USB stack cannot
+sustain the top rate; the 32U3 tables have no such guard. `libslogic` does
+**not** bake this in — it exposes only the native ceilings and leaves picking a
+lower rate on Windows to the user rather than forcibly capping. A front end may
+still clamp in its own config surface if it chooses.
 
 The advertised discrete samplerate list per model is the sorted set of
 `SR_MHZ(n)` values in `samplerates_slogic16u3` / `_slogic32u3` /
@@ -70,7 +71,7 @@ nearest advertised rate not exceeding the ceiling; libsigrok requires an exact
 table hit and otherwise wraps to the ceiling. all-logic also applies a runtime
 cap of `320 MHz / channel_count` whenever a U3 link enumerates below USB 3.0
 (`slogic_link_max_rate`), a real USB2 payload limit that libsigrok lacks and
-that `libslogic` adopts.
+that stays host-side, not in the core.
 
 ---
 
@@ -242,7 +243,6 @@ typedef struct {
     uint64_t samplerate_hz;
     double   threshold_v;
     int      pattern_mode;    /* 0 Normal, 1 USB test, 2 Emulation */
-    int      windows_capped;  /* pick the _WIN32 ceiling table */
 } slogic_config;
 
 /* Control path (issues the register/AUX transactions of sections 2/2b). */
@@ -363,8 +363,9 @@ read-back against a hard-coded `1024` (`api.c:1154`) and so always logs a false
 Requested-rate resolution differs (all-logic snaps to nearest ≤ ceiling;
 libsigrok requires an exact hit or wraps to the ceiling) and stays adapter-side
 (config surface, section 5). all-logic's runtime `320 MHz / nch` cap for U3
-links below USB 3.0 is real and **canonical** — `libslogic` applies it; the
-libsigrok side gains it on adoption.
+links below USB 3.0, and the Windows ceiling notch, likewise stay host-side: the
+core programs whatever samplerate it is handed and never caps. A front end that
+wants those limits keeps them in its own config surface.
 
 ---
 

@@ -34,15 +34,13 @@ static void test_models(void)
 	CHECK(slogic_models(&n) != NULL && n == 3);
 
 	/* Ceilings: same physical mapping the two drivers agree on. */
-	CHECK(slogic_max_rate(m16, 4, 0) == SLOGIC_MHZ(800));
-	CHECK(slogic_max_rate(m16, 8, 0) == SLOGIC_MHZ(400));
-	CHECK(slogic_max_rate(m16, 16, 0) == SLOGIC_MHZ(200));
-	CHECK(slogic_max_rate(m16, 16, 1) == SLOGIC_MHZ(100)); /* Windows cap */
-	CHECK(slogic_max_rate(m32, 4, 0) == SLOGIC_MHZ(1600));
-	CHECK(slogic_max_rate(m32, 32, 0) == SLOGIC_MHZ(200));
-	CHECK(slogic_max_rate(m32, 32, 1) == SLOGIC_MHZ(200)); /* no Windows table */
-	CHECK(slogic_max_rate(c8, 8, 0) == SLOGIC_MHZ(40));
-	CHECK(slogic_max_rate(m16, 5, 0) == 0);  /* not a mode */
+	CHECK(slogic_max_rate(m16, 4) == SLOGIC_MHZ(800));
+	CHECK(slogic_max_rate(m16, 8) == SLOGIC_MHZ(400));
+	CHECK(slogic_max_rate(m16, 16) == SLOGIC_MHZ(200));
+	CHECK(slogic_max_rate(m32, 4) == SLOGIC_MHZ(1600));
+	CHECK(slogic_max_rate(m32, 32) == SLOGIC_MHZ(200));
+	CHECK(slogic_max_rate(c8, 8) == SLOGIC_MHZ(40));
+	CHECK(slogic_max_rate(m16, 5) == 0);  /* not a mode */
 }
 
 static void test_plan(void)

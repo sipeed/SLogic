@@ -10,8 +10,7 @@
  * (at your option) any later version.  See <http://www.gnu.org/licenses/>.
  *
  * Model table only; the U3 register/AUX protocol lives in slogic.c and is
- * shared with slogic16u3.c. The 32U3 table has no Windows-capped variant in
- * either driver (limits_win = NULL): it keeps the native ceilings on Windows.
+ * shared with slogic16u3.c.
  */
 
 #include "slogic.h"
@@ -41,6 +40,5 @@ const slogic_model slogic_model_32u3 = {
 	.rates = rates_32u3,
 	.rate_count = sizeof(rates_32u3) / sizeof(rates_32u3[0]),
 	.limits = limits_32u3,
-	.limits_win = NULL,
 	.limit_count = sizeof(limits_32u3) / sizeof(limits_32u3[0]),
 };

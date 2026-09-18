@@ -31,13 +31,6 @@ static const slogic_rate_limit limits_16u3[] = {
 	{ 16, SLOGIC_MHZ(200) },
 };
 
-/* Windows USB stack cannot sustain the top rate: one notch lower each. */
-static const slogic_rate_limit limits_16u3_win[] = {
-	{ 4, SLOGIC_MHZ(400) },
-	{ 8, SLOGIC_MHZ(200) },
-	{ 16, SLOGIC_MHZ(100) },
-};
-
 const slogic_model slogic_model_16u3 = {
 	.name = "SLogic16U3",
 	.pid = SLOGIC_PID_16U3,
@@ -48,6 +41,5 @@ const slogic_model slogic_model_16u3 = {
 	.rates = rates_16u3,
 	.rate_count = sizeof(rates_16u3) / sizeof(rates_16u3[0]),
 	.limits = limits_16u3,
-	.limits_win = limits_16u3_win,
 	.limit_count = sizeof(limits_16u3) / sizeof(limits_16u3[0]),
 };

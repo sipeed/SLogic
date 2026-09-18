@@ -49,7 +49,6 @@ static const slogic_model slogic_model_combo8 = {
 	.rates = rates_combo8,
 	.rate_count = sizeof(rates_combo8) / sizeof(rates_combo8[0]),
 	.limits = limits_combo8,
-	.limits_win = NULL,
 	.limit_count = sizeof(limits_combo8) / sizeof(limits_combo8[0]),
 };
 
@@ -77,17 +76,15 @@ const slogic_model *slogic_model_for_pid(uint16_t pid)
 	return NULL;
 }
 
-uint64_t slogic_max_rate(const slogic_model *m, int channel_count, int windows)
+uint64_t slogic_max_rate(const slogic_model *m, int channel_count)
 {
-	const slogic_rate_limit *tbl;
 	size_t i;
 
 	if (!m)
 		return 0;
-	tbl = (windows && m->limits_win) ? m->limits_win : m->limits;
 	for (i = 0; i < m->limit_count; i++) {
-		if (tbl[i].channels == channel_count)
-			return tbl[i].max_rate_hz;
+		if (m->limits[i].channels == channel_count)
+			return m->limits[i].max_rate_hz;
 	}
 	return 0;
 }
