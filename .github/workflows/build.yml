@@ -33,7 +33,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [linux-x86_64-musl, windows-x86_64-ucrt]
+        include:
+          - target: linux-x86_64-musl
+            extra: ''
+          # Wine spawns a process per moc/compiler invocation; the all-logic
+          # (DSView) build runs autotools + cmake concurrently and overruns the
+          # Wine process table at high parallelism, so cap the job budget.
+          - target: windows-x86_64-ucrt
+            extra: '--jobs 2'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,7 +51,7 @@ jobs:
         run: |
           python3 build/scripts/build \
             --target "${{ matrix.target }}" \
-            --product "$PRODUCTS"
+            --product "$PRODUCTS" ${{ matrix.extra }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -60,6 +67,10 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+
+      # build-native bundles dylibs with dylibbundler (macdeployqt handles Qt).
+      - name: Install packaging tools
+        run: brew install dylibbundler
 
       # --- dependency prefix ---------------------------------------------------
       # build-native needs SLOGIC_MACOS_PREFIX pointing at a conda prefix holding
