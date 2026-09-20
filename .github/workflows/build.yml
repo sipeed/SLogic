@@ -1,0 +1,140 @@
+name: build
+
+# Builds every product for all three targets.
+#   linux-x86_64-musl  + windows-x86_64-ucrt : container builds (Docker /
+#     Wine-in-Docker), run on a Linux runner.
+#   macos-arm64                              : native build on an Apple Silicon
+#     runner, code-signed + notarized.
+#
+# The build environments (slogic/buildenv-*) are built from the Dockerfiles in
+# build/environments/ on first use by ensure-environment; caching them to a
+# registry (ghcr.io) or via buildx layer cache is a worthwhile follow-up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      products:
+        description: Comma-separated products
+        default: pulseview,slogicview,sigrok-cli,all-logic
+  push:
+    tags:
+      - 'release-*'
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTS: ${{ github.event.inputs.products || 'pulseview,slogicview,sigrok-cli,all-logic' }}
+
+jobs:
+  container-targets:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux-x86_64-musl, windows-x86_64-ucrt]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0   # the build derives its version from git history
+
+      - name: Build ${{ matrix.target }}
+        run: |
+          python3 build/scripts/build \
+            --target "${{ matrix.target }}" \
+            --product "$PRODUCTS"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: artifact/**
+          if-no-files-found: error
+
+  macos-target:
+    name: macos-arm64
+    runs-on: macos-14   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # --- dependency prefix ---------------------------------------------------
+      # build-native needs SLOGIC_MACOS_PREFIX pointing at a conda prefix holding
+      # the deps (Qt6, glib, boost, python, fftw, libusb, libzip, ...). It is
+      # recreated exactly from the committed conda-lock (an @EXPLICIT list of
+      # conda-forge URLs with md5) and built with MACOSX_DEPLOYMENT_TARGET=15.0.
+      # Homebrew does NOT work (its bottles target the host macOS and fail the
+      # deployment-target check). The prefix is ~1.5 GB, so it is cached.
+      - name: Cache dependency prefix
+        id: prefix-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/macos15-env
+          key: macos15-env-${{ hashFiles('build/environments/macos-xcode/conda-lock.txt') }}
+
+      - name: Create dependency prefix
+        if: steps.prefix-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -Ls https://micro.mamba.pm/api/micromamba/osx-arm64/latest \
+            | tar -xj -C "$RUNNER_TEMP" bin/micromamba
+          "$RUNNER_TEMP/bin/micromamba" create -y -p "$HOME/macos15-env" \
+            -f build/environments/macos-xcode/conda-lock.txt
+
+      - name: Export prefix path
+        run: echo "SLOGIC_MACOS_PREFIX=$HOME/macos15-env" >> "$GITHUB_ENV"
+
+      # --- signing identity: Developer ID cert into a temporary keychain -------
+      - name: Import signing certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/slogic.keychain-db"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Make the temp keychain searchable alongside the login keychain.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed 's/["]//g')
+
+      # --- notary credentials: Apple ID + app-specific password -> keychain profile
+      # (matches the build Mac's existing slogic-notary profile). The password is
+      # an app-specific password from appleid.apple.com, NOT the Apple ID login. --
+      - name: Store notary credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          xcrun notarytool store-credentials slogic-notary \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$NOTARY_TEAM_ID"
+
+      - name: Build macos-arm64 (signed + notarized)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '15.0'
+          # Not secret (Team IDs are public), but kept out of the file:
+          MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_PROFILE: slogic-notary
+        run: |
+          python3 build/scripts/build --target macos-arm64 --product "$PRODUCTS"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: artifact/**
+          if-no-files-found: error
+
+      - name: Clean up keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/slogic.keychain-db" || true
