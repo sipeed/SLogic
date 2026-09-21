@@ -49,21 +49,27 @@ jobs:
           submodules: recursive
           fetch-depth: 0   # the build derives its version from git history
 
-      - uses: docker/setup-buildx-action@v3
+      # Persist the buildenv image as a tarball keyed on the environment's
+      # contents (the Dockerfile), so the ~30 min toolchain rebuild is skipped
+      # on every run. actions/cache is more reliable than buildx type=gha, which
+      # did not persist across runs here.
+      - name: Cache buildenv image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/buildenv-${{ matrix.env }}.tar
+          key: buildenv-${{ matrix.env }}-${{ hashFiles(format('build/environments/{0}/**', matrix.env)) }}
 
-      # Pre-build the buildenv image with a persistent GHA layer cache and load
-      # it under the exact tag ensure-environment expects, so build/scripts/build
-      # reuses it instead of rebuilding the (~30 min) toolchain image each run.
-      - name: Pre-build cached build environment
+      - name: Load or build build environment
         run: |
-          IMG=$(python3 build/scripts/ensure-environment "${{ matrix.env }}" --print-only)
-          echo "image: $IMG"
-          docker buildx build \
-            --cache-from "type=gha,scope=${{ matrix.env }}" \
-            --cache-to "type=gha,mode=max,scope=${{ matrix.env }}" \
-            --tag "$IMG" --load \
-            -f "build/environments/${{ matrix.env }}/Dockerfile" \
-            "build/environments/${{ matrix.env }}"
+          TAR="/tmp/buildenv-${{ matrix.env }}.tar"
+          if [ -f "$TAR" ]; then
+            echo "buildenv cache hit -> docker load"
+            docker load -i "$TAR"
+          else
+            echo "buildenv cache miss -> building image"
+            IMG=$(python3 build/scripts/ensure-environment "${{ matrix.env }}")
+            docker save "$IMG" -o "$TAR"
+          fi
 
       - name: Build ${{ matrix.target }}
         run: |
