@@ -35,17 +35,35 @@ jobs:
       matrix:
         include:
           - target: linux-x86_64-musl
+            env: linux-alpine-3.22
             extra: ''
           # Wine spawns a process per moc/compiler invocation; the all-logic
           # (DSView) build runs autotools + cmake concurrently and overruns the
-          # Wine process table at high parallelism, so cap the job budget.
+          # Wine process table at very high parallelism, so keep it modest.
           - target: windows-x86_64-ucrt
-            extra: '--jobs 2'
+            env: windows-msys2-ucrt64
+            extra: '--jobs 3'
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0   # the build derives its version from git history
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Pre-build the buildenv image with a persistent GHA layer cache and load
+      # it under the exact tag ensure-environment expects, so build/scripts/build
+      # reuses it instead of rebuilding the (~30 min) toolchain image each run.
+      - name: Pre-build cached build environment
+        run: |
+          IMG=$(python3 build/scripts/ensure-environment "${{ matrix.env }}" --print-only)
+          echo "image: $IMG"
+          docker buildx build \
+            --cache-from "type=gha,scope=${{ matrix.env }}" \
+            --cache-to "type=gha,mode=max,scope=${{ matrix.env }}" \
+            --tag "$IMG" --load \
+            -f "build/environments/${{ matrix.env }}/Dockerfile" \
+            "build/environments/${{ matrix.env }}"
 
       - name: Build ${{ matrix.target }}
         run: |
