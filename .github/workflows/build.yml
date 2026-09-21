@@ -82,6 +82,7 @@ jobs:
           name: ${{ matrix.target }}
           path: artifact/**
           if-no-files-found: error
+          retention-days: 7
 
   macos-target:
     name: macos-arm64
@@ -169,7 +170,33 @@ jobs:
           name: macos-arm64
           path: artifact/**
           if-no-files-found: error
+          retention-days: 7
 
       - name: Clean up keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/slogic.keychain-db" || true
+
+  # On a release-* tag, publish the built products as a GitHub Release: a
+  # permanent, publicly downloadable version. Plain runs only keep the 7-day
+  # artifacts above (which need a GitHub login to download).
+  release:
+    if: startsWith(github.ref, 'refs/tags/release-')
+    needs: [container-targets, macos-target]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/*.AppImage
+            dist/**/*.exe
+            dist/**/*.dmg
+            dist/**/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
