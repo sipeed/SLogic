@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_DIR=$(cd "$(dirname "$0")" && pwd)
+BUILD_HOME=$(cd "$TARGET_DIR/../.." && pwd)
+SOURCES=""
+OUTPUT=""
+OUT="$BUILD_HOME/out/linux-x86_64-glibc/${BUILD_TYPE:-release}"
+CACHE="$BUILD_HOME/out/cache"
+PRODUCTS="sigrok-bridge,ngscopeclient"
+JOBS="${BUILD_JOBS:-$(nproc)}"
+ENGINE=""
+CLEAN=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --sources) SOURCES=$(realpath "$2"); shift 2 ;;
+        --output) OUTPUT=$(realpath -m "$2"); shift 2 ;;
+        --out) OUT=$(realpath -m "$2"); shift 2 ;;
+        --cache) CACHE=$(realpath -m "$2"); shift 2 ;;
+        --products) PRODUCTS=$2; shift 2 ;;
+        --clean) CLEAN=1; shift ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$SOURCES" ] || [ -z "$OUTPUT" ]; then
+    echo "Usage: $0 --sources DIR --output DIR --products LIST [--out DIR] [--cache DIR] [--clean]" >&2
+    exit 2
+fi
+ENGINE=$("$BUILD_HOME/scripts/resolve-container-engine")
+IFS=, read -r -a product_list <<<"$PRODUCTS"
+for product in "${product_list[@]}"; do
+    case "$product" in sigrok-bridge|ngscopeclient) ;; *) echo "Unsupported glibc product: $product" >&2; exit 2 ;; esac
+    test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
+done
+case ",$PRODUCTS," in *,sigrok-bridge,*) ;; *) rm -f "$OUTPUT/sigrok-bridge-SLogic-linux-x86_64-glibc.tar.gz" ;; esac
+case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLogic-linux-x86_64-glibc.AppImage" ;; esac
+
+# The ngscopeclient wrapper is pure-upstream scopehal-apps; its `lib` submodule
+# (the scopehal fork carrying the SLogic driver) is overridden on the host here,
+# before the container run and before SOURCE state is captured. This never edits
+# the wrapper's tracked .gitmodules (only the nested checkout), so the release
+# clean-check (which ignores submodule state for override components) still holds.
+override_ngscopeclient_lib() {
+    local wrapper="$SOURCES/ngscopeclient"
+    # shellcheck disable=SC1091
+    . "$BUILD_HOME/common/ngscopeclient-lib.env"
+    local lib="$wrapper/$LIB_SUBMODULE"
+    # Init the wrapper's submodules at their recorded baseline first (this pins
+    # lib to the upstream gitlink), THEN override lib to the fork commit. Doing
+    # the wrapper's recursive update AFTER the checkout would revert lib.
+    git -C "$wrapper" submodule update --init --recursive
+    if [ "$(git -C "$lib" rev-parse HEAD 2>/dev/null || true)" != "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}" 2>/dev/null || true)" ]; then
+        echo "Overriding scopehal lib -> $LIB_URL $LIB_BRANCH ($LIB_COMMIT)"
+        # Fetch only if the pinned commit isn't already in the object store
+        # (avoids a network round-trip on re-runs); retry transient failures.
+        if ! git -C "$lib" rev-parse --verify --quiet "$LIB_COMMIT^{commit}" >/dev/null 2>&1; then
+            n=0
+            until git -C "$lib" fetch --depth 1 "$LIB_URL" "$LIB_BRANCH"; do
+                n=$((n + 1))
+                [ "$n" -ge 3 ] && { echo "scopehal lib fetch failed after $n attempts" >&2; exit 1; }
+                echo "lib fetch failed (transient?); retry $n/3 in 5s"; sleep 5
+            done
+        fi
+        git -C "$lib" checkout --detach "$LIB_COMMIT"
+        # Reconcile lib's own nested submodules to the fork commit (not the
+        # wrapper's, which would reset lib back to the baseline).
+        git -C "$lib" submodule update --init --recursive
+    fi
+    test "$(git -C "$lib" rev-parse HEAD)" = "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}")" \
+        || { echo "scopehal lib override did not land on $LIB_COMMIT" >&2; exit 1; }
+}
+case ",$PRODUCTS," in *,ngscopeclient,*) override_ngscopeclient_lib ;; esac
+
+mkdir -p "$CACHE/ccache/linux-x86_64-glibc" \
+    "$CACHE/cargo/linux-x86_64-glibc/registry" \
+    "$CACHE/cargo/linux-x86_64-glibc/git" \
+    "$CACHE/libsigrok-sys" \
+    "$OUTPUT" "$(dirname "$OUT")"
+if [ "$CLEAN" -eq 1 ]; then
+    echo "Cleaning target workspace: $OUT"
+    rm -rf "$OUT"
+fi
+mkdir -p "$OUT"
+
+IMAGE=$(CONTAINER_ENGINE="$ENGINE" "$BUILD_HOME/scripts/ensure-environment" "${SLOGIC_BUILD_ENVIRONMENT:-linux-glibc}")
+
+# The engine may see fewer CPUs than the host (cgroup limits); clamp --cpus.
+CPUS="${CONTAINER_CPUS:-$JOBS}"
+ENGINE_CPUS=$("$ENGINE" info --format '{{.NCPU}}' 2>/dev/null || true)
+case "$ENGINE_CPUS" in ''|*[!0-9]*) ENGINE_CPUS=$("$ENGINE" info --format '{{.Host.CPUs}}' 2>/dev/null || true) ;; esac
+case "$ENGINE_CPUS" in ''|*[!0-9]*) ENGINE_CPUS="" ;; esac
+if [ -n "$ENGINE_CPUS" ] && [ "$ENGINE_CPUS" -gt 0 ] && [ "$CPUS" -gt "$ENGINE_CPUS" ]; then
+    CPUS=$ENGINE_CPUS
+fi
+
+# Source git state is resolved on the host: submodule gitdirs live in the
+# superproject and are not visible inside the container. sigrok-bridge uses the
+# usual "<commit>[-dirty]"; ngscopeclient uses a deterministic pinned identity
+# "<wrapper_head>+lib-<override_commit>" so the expected lib override never reads
+# as -dirty and the stamp changes iff the wrapper OR the pinned lib commit does.
+source_env=()
+if [ -f "$BUILD_HOME/common/ngscopeclient-lib.env" ]; then
+    # shellcheck disable=SC1091
+    . "$BUILD_HOME/common/ngscopeclient-lib.env"
+fi
+for project in sigrok-bridge ngscopeclient; do
+    variable="SOURCE_${project^^}_STATE"
+    variable=${variable//-/_}
+    state=""
+    if git -C "$SOURCES/$project" rev-parse --git-dir >/dev/null 2>&1; then
+        head=$(git -C "$SOURCES/$project" rev-parse HEAD)
+        if [ "$project" = ngscopeclient ]; then
+            state="${head}+lib-${LIB_COMMIT:-unknown}"
+            [ -z "$(git -C "$SOURCES/$project" status --porcelain --ignore-submodules=all)" ] || state="$state-dirty"
+        else
+            state="$head"
+            [ -z "$(git -C "$SOURCES/$project" status --porcelain)" ] || state="$state-dirty"
+        fi
+    fi
+    source_env+=( -e "$variable=$state" )
+done
+
+"$ENGINE" run --rm \
+    --cpus="$CPUS" \
+    -e BUILD_JOBS="$JOBS" \
+    -e BUILD_TYPE="${BUILD_TYPE:-Release}" \
+    -e RELEASE_VERSION="${RELEASE_VERSION:-0.0.0-dev}" \
+    -e PRODUCTS="$PRODUCTS" \
+    -e SLOGIC_BUILD_LOGIC_KEY="${SLOGIC_BUILD_LOGIC_KEY:-unknown}" \
+    -e LIBSIGROK_SYS_CACHE_DIR=/cache/libsigrok-sys \
+    -e APPIMAGE_EXTRACT_AND_RUN=1 \
+    "${source_env[@]}" \
+    -v "$SOURCES:/sources:ro" \
+    -v "$BUILD_HOME/common:/support:ro" \
+    -v "$TARGET_DIR:/target:ro" \
+    -v "$OUT:/workspace" \
+    -v "$CACHE/ccache/linux-x86_64-glibc:/cache/ccache" \
+    -v "$CACHE/cargo/linux-x86_64-glibc/registry:/opt/rust/cargo/registry" \
+    -v "$CACHE/cargo/linux-x86_64-glibc/git:/opt/rust/cargo/git" \
+    -v "$CACHE/libsigrok-sys:/cache/libsigrok-sys" \
+    -v "$OUTPUT:/output" \
+    "$IMAGE" bash /target/build-in-container

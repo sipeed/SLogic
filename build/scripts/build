@@ -26,8 +26,29 @@ ENVIRONMENTS_DIR = BUILD_HOME / "environments"
 TARGETS_DIR = BUILD_HOME / "targets"
 
 
-def workspace_sources() -> list[dict[str, str]]:
+def override_sources(components: dict[str, dict]) -> dict[str, dict]:
+    """Source-checkout name -> lib-override pin, for components declaring one.
+
+    A build-time submodule override (e.g. ngscopeclient's `lib` fork) leaves the
+    source checkout permanently differing from its recorded gitlink. Such a
+    checkout's dirtiness is evaluated with --ignore-submodules=all so the
+    expected override is not mistaken for uncommitted work.
+    """
+    result: dict[str, dict] = {}
+    for item in components.values():
+        if item.get("override_submodule"):
+            result[item["source"]] = {
+                "submodule": item["override_submodule"],
+                "url": item.get("override_url", ""),
+                "branch": item.get("override_branch", ""),
+                "commit": item.get("override_commit", ""),
+            }
+    return result
+
+
+def workspace_sources(overrides: dict[str, dict] | None = None) -> list[dict[str, str]]:
     """Resolve every declared submodule to its checked-out revision."""
+    overrides = overrides or {}
     modules: dict[str, dict[str, str]] = {}
     listing = git(WORKSPACE, "config", "-f", str(WORKSPACE / ".gitmodules"), "--list")
     for line in listing.splitlines():
@@ -42,14 +63,21 @@ def workspace_sources() -> list[dict[str, str]]:
             raise SystemExit(
                 f"missing source checkout: {module['path']} (run git submodule update --init)"
             )
-        sources.append({
+        override = overrides.get(Path(module["path"]).name) or overrides.get(name)
+        status_args = ["status", "--porcelain"]
+        if override:
+            status_args.append("--ignore-submodules=all")
+        entry = {
             "name": name,
             "path": module["path"],
             "url": module["url"],
             "branch": module.get("branch", ""),
             "revision": git(checkout, "rev-parse", "HEAD"),
-            "dirty": bool(git(checkout, "status", "--porcelain")),
-        })
+            "dirty": bool(git(checkout, *status_args)),
+        }
+        if override:
+            entry["override"] = dict(override)
+        sources.append(entry)
     return sorted(sources, key=lambda item: item["path"])
 
 
@@ -233,7 +261,27 @@ def main() -> int:
             )
         if source not in checkouts:
             checkouts.append(source)
-    dirty = [checkout for checkout in checkouts if git(checkout, "status", "--porcelain")]
+    # Components with a build-time submodule override (e.g. ngscopeclient's lib
+    # fork) leave their checkout permanently "dirty" against the recorded
+    # gitlink. Evaluate such a checkout with --ignore-submodules=all so the
+    # expected override never blocks a release; when one is in the build, also
+    # relax the superproject to ignore that submodule's dirty content (each
+    # source is still checked strictly on its own below).
+    overrides = override_sources(components)
+    has_override_checkout = any(
+        checkout is not WORKSPACE and checkout.name in overrides for checkout in checkouts
+    )
+
+    def checkout_dirty(checkout: Path) -> bool:
+        status_args = ["status", "--porcelain"]
+        if checkout is WORKSPACE:
+            if has_override_checkout:
+                status_args.append("--ignore-submodules=dirty")
+        elif checkout.name in overrides:
+            status_args.append("--ignore-submodules=all")
+        return bool(git(checkout, *status_args))
+
+    dirty = [checkout for checkout in checkouts if checkout_dirty(checkout)]
     if channel == "release" and dirty:
         for checkout in dirty:
             print(f"Dirty checkout: {checkout}", file=sys.stderr)
@@ -250,9 +298,9 @@ def main() -> int:
     sources_lock = artifact_root / "sources.lock.json"
     lock = {
         "workspace_commit": workspace_commit,
-        "workspace_dirty": bool(git(WORKSPACE, "status", "--porcelain")),
+        "workspace_dirty": checkout_dirty(WORKSPACE),
         "version": version_id,
-        "sources": workspace_sources(),
+        "sources": workspace_sources(overrides),
     }
     sources_lock.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
 

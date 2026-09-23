@@ -39,3 +39,26 @@ kind = "product"
 source = "all-logic"
 dependencies = []
 targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
+
+# Rust bridge server (twinlan protocol). Self-contained: its libsigrok-sys
+# crate builds its own static libsigrok + C deps, so dependencies = []. Only
+# the glibc Linux target and macOS (Vulkan/glibc-validated; Windows deferred).
+[sigrok-bridge]
+kind = "product"
+source = "sigrok-bridge"
+dependencies = []
+targets = ["linux-x86_64-glibc", "macos-arm64"]
+
+# ngscopeclient (scopehal-apps GUI). Self-contained: bundles its own scopehal
+# fork via the `lib` submodule. The superproject records pure-upstream
+# scopehal-apps; the fork is applied as a build-time submodule override (the
+# override_* keys below), never committed. See build/common/ngscopeclient-lib.env.
+[ngscopeclient]
+kind = "product"
+source = "ngscopeclient"
+dependencies = []
+targets = ["linux-x86_64-glibc", "macos-arm64"]
+override_submodule = "lib"
+override_url = "https://github.com/sipeed/scopehal.git"
+override_branch = "feat/SLogic"
+override_commit = "046a8c13"

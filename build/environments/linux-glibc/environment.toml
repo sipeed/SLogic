@@ -1,0 +1,4 @@
+name = "linux-glibc"
+executor = "docker"
+image = "slogic/buildenv-linux-glibc"
+description = "Debian 12 glibc x86_64 SDK for ngscopeclient + sigrok-bridge"

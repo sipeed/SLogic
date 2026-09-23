@@ -1,0 +1,6 @@
+name = "linux-x86_64-glibc"
+environment = "linux-glibc"
+driver = "build"
+host_systems = ["Linux"]
+default_products = ["sigrok-bridge", "ngscopeclient"]
+package_format = "AppImage + tarball"

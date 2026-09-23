@@ -22,3 +22,11 @@
 	path = sources/all-logic
 	url = https://github.com/sipeed/ALL-LOGIC.git
 	branch = main
+[submodule "sources/sigrok-bridge"]
+	path = sources/sigrok-bridge
+	url = https://github.com/sipeed/sigrok-bridge-server.git
+	branch = main
+[submodule "sources/ngscopeclient"]
+	path = sources/ngscopeclient
+	url = https://github.com/ngscopeclient/scopehal-apps.git
+	branch = master

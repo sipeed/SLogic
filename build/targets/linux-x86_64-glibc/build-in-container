@@ -1,0 +1,193 @@
+#!/bin/bash
+set -euo pipefail
+
+SOURCE_DIR=/sources
+SUPPORT_DIR=/support
+BUILD_DIR=/workspace
+OUTPUT_DIR=/output
+JOBS="${BUILD_JOBS:-${JOBS:-$(nproc)}}"
+BUILD_TYPE="${BUILD_TYPE:-Release}"
+PRODUCTS="${PRODUCTS:-sigrok-bridge,ngscopeclient}"
+RELEASE_VERSION="${RELEASE_VERSION:-0.0.0-dev}"
+
+has_product() {
+    case ",$PRODUCTS," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+
+STAMP_DIR="$BUILD_DIR/.slogic-state"
+mkdir -p "$STAMP_DIR"
+logic_key="${SLOGIC_BUILD_LOGIC_KEY:-unknown}"
+if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "$logic_key" ]; then
+    echo "Build logic changed; invalidating target workspace."
+    rm -rf "$BUILD_DIR/build" "$BUILD_DIR/sr" "$BUILD_DIR/AppDir-ngscopeclient"
+fi
+
+# Source states come from the host as SOURCE_<NAME>_STATE. A change (commit or
+# -dirty) forces an incremental rebuild of that product; a commit change removes
+# its build tree. Both products are self-contained (no shared sigrok prefix).
+state_of() {
+    local variable="SOURCE_${1^^}_STATE"
+    variable=${variable//-/_}
+    printf '%s' "${!variable:-unknown}"
+}
+
+declare -A source_state product_build
+for product in sigrok-bridge ngscopeclient; do
+    has_product "$product" || continue
+    state=$(state_of "$product")
+    source_state[$product]=$state
+    product_build[$product]=0
+    stamp=""
+    [ ! -f "$STAMP_DIR/$product" ] || stamp=$(cat "$STAMP_DIR/$product")
+    if [ "${stamp//-dirty/}" != "${state//-dirty/}" ]; then
+        product_build[$product]=1
+        rm -rf "$BUILD_DIR/build/$product" "$BUILD_DIR/AppDir-$product"
+    elif [ "$stamp" != "$state" ] || [[ "$state" == *-dirty ]]; then
+        product_build[$product]=1
+    fi
+done
+
+export CCACHE_DIR=/cache/ccache
+ccache --max-size "${CCACHE_MAX_SIZE:-20G}" >/dev/null 2>&1 || true
+if [ -d /usr/lib/ccache ]; then
+    export PATH="/usr/lib/ccache:$PATH"
+fi
+
+echo "=== ngscope glibc Build (Debian 12) ==="
+echo "Toolchain: $(cc --version | head -n 1); libc: glibc; jobs: $JOBS; type: $BUILD_TYPE"
+command -v cargo >/dev/null && echo "Rust: $(cargo --version)"
+
+echo "[1/4] Synchronizing source code into persistent workspace..."
+projects=()
+has_product sigrok-bridge && projects+=(sigrok-bridge)
+has_product ngscopeclient && projects+=(ngscopeclient)
+for project in "${projects[@]}"; do
+    rsync -a --delete --exclude='.git' "$SOURCE_DIR/$project/" "$BUILD_DIR/$project/"
+done
+cp "$SUPPORT_DIR/Makefile" "$BUILD_DIR/Makefile"
+cd "$BUILD_DIR"
+
+build_targets=()
+has_product sigrok-bridge && [ "${product_build[sigrok-bridge]}" -eq 1 ] && build_targets+=("install-sigrok-bridge")
+has_product ngscopeclient && [ "${product_build[ngscopeclient]}" -eq 1 ] && build_targets+=("install-ngscopeclient")
+if [ "${#build_targets[@]}" -gt 0 ]; then
+    echo "[2/4] Building changed products: ${build_targets[*]}"
+    # Build sequentially: cargo and cmake+ninja each already saturate the cores,
+    # and the C-from-source libsigrok-sys step is heavy.
+    for goal in "${build_targets[@]}"; do
+        make JOBS="$JOBS" BUILD_TYPE="$BUILD_TYPE" RELEASE_VERSION="$RELEASE_VERSION" "$goal"
+    done
+else
+    echo "[2/4] Reusing all selected product builds."
+fi
+
+# ---- packaging ------------------------------------------------------------
+SIGROK_BRIDGE_OUTPUT="$OUTPUT_DIR/sigrok-bridge-SLogic-linux-x86_64-glibc.tar.gz"
+NGSCOPECLIENT_OUTPUT="$OUTPUT_DIR/ngscopeclient-SLogic-linux-x86_64-glibc.AppImage"
+sigrok_bridge_package=0
+ngscopeclient_package=0
+has_product sigrok-bridge && { [ "${product_build[sigrok-bridge]}" -eq 1 ] || [ ! -s "$SIGROK_BRIDGE_OUTPUT" ]; } && sigrok_bridge_package=1
+has_product ngscopeclient && { [ "${product_build[ngscopeclient]}" -eq 1 ] || [ ! -s "$NGSCOPECLIENT_OUTPUT" ]; } && ngscopeclient_package=1
+
+mkdir -p "$OUTPUT_DIR"
+
+if [ "$sigrok_bridge_package" -eq 1 ]; then
+    echo "[3/4] Packaging sigrok-bridge (glibc-only static tarball)..."
+    rm -f "$SIGROK_BRIDGE_OUTPUT"
+    tar -czf "$SIGROK_BRIDGE_OUTPUT" -C sr/bin sigrok-bridge fake-bridge
+fi
+
+create_ngscopeclient_appdir() {
+    local appdir=$1
+    echo "[3/4] Creating ngscopeclient glibc AppDir..."
+    rm -rf "$appdir"
+    mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" \
+        "$appdir/usr/share/ngscopeclient" "$appdir/usr/share/scopehal" \
+        "$appdir/usr/share/applications" \
+        "$appdir/usr/share/icons/hicolor/256x256/apps"
+    install -Dm755 sr/bin/ngscopeclient "$appdir/usr/bin/ngscopeclient"
+    cp -a sr/lib/libscopehal.so "$appdir/usr/lib/"
+    cp -a sr/lib/libscopeprotocols.so "$appdir/usr/lib/"
+    # Resources ngscopeclient looks for under <bin_parent>/share/{ngscopeclient,scopehal}.
+    [ -d sr/share/ngscopeclient ] && cp -a sr/share/ngscopeclient/. "$appdir/usr/share/ngscopeclient/"
+    [ -d sr/share/scopehal ] && cp -a sr/share/scopehal/. "$appdir/usr/share/scopehal/"
+    cat > "$appdir/usr/share/applications/ngscopeclient.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=ngscopeclient
+GenericName=Oscilloscope Client
+Comment=Oscilloscope and logic analyzer GUI
+Exec=ngscopeclient
+Icon=ngscopeclient
+Terminal=false
+Categories=Science;Electronics;
+StartupWMClass=ngscopeclient
+EOF
+    # Icon: render the scopehal-apps SVG if possible, else a minimal PNG so the
+    # AppImage spec (icon required) is satisfied.
+    local icon_png="$appdir/usr/share/icons/hicolor/256x256/apps/ngscopeclient.png"
+    local icon_src="ngscopeclient/src/ngscopeclient/icons/scalable/input-bnc.svg"
+    if [ -f "$icon_src" ] && command -v rsvg-convert >/dev/null; then
+        rsvg-convert -w 256 -h 256 "$icon_src" -o "$icon_png"
+    else
+        python3 - "$icon_png" <<'PY'
+import sys, struct, zlib
+def png(w, h, rgb):
+    def chunk(tag, data):
+        crc = zlib.crc32(tag + data) & 0xffffffff
+        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', crc)
+    sig = b'\x89PNG\r\n\x1a\n'
+    ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+    raw = b''.join(b'\x00' + rgb*w for _ in range(h))
+    return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+open(sys.argv[1], 'wb').write(png(256, 256, b'\x1a\x3a\x6e'))
+PY
+    fi
+    cp "$appdir/usr/share/applications/ngscopeclient.desktop" "$appdir/"
+    cp "$icon_png" "$appdir/ngscopeclient.png"
+    cat > "$appdir/AppRun" <<'EOF'
+#!/usr/bin/env bash
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
+exec "$HERE/usr/bin/ngscopeclient" "$@"
+EOF
+    chmod +x "$appdir/AppRun"
+}
+
+if [ "$ngscopeclient_package" -eq 1 ]; then
+    NG_APPDIR="$BUILD_DIR/AppDir-ngscopeclient"
+    create_ngscopeclient_appdir "$NG_APPDIR"
+    echo "[4/4] Bundling transitive .so with linuxdeploy and emitting AppImage..."
+    rm -f "$NGSCOPECLIENT_OUTPUT"
+    # NO_STRIP: newer glibc libs use .relr.dyn which linuxdeploy's bundled strip
+    # can't handle; glibc has the relocation types natively so the ELF stays valid.
+    # APPIMAGE_EXTRACT_AND_RUN: no FUSE inside the container.
+    ( cd "$BUILD_DIR" && NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT="$NGSCOPECLIENT_OUTPUT" \
+        linuxdeploy --appdir "$NG_APPDIR" \
+            --executable "$NG_APPDIR/usr/bin/ngscopeclient" \
+            --library "$NG_APPDIR/usr/lib/libscopehal.so" \
+            --library "$NG_APPDIR/usr/lib/libscopeprotocols.so" \
+            --desktop-file "$NG_APPDIR/usr/share/applications/ngscopeclient.desktop" \
+            --icon-file "$NG_APPDIR/ngscopeclient.png" \
+            --output appimage )
+    # linuxdeploy honours $OUTPUT for the appimage path; fall back to CWD glob.
+    if [ ! -s "$NGSCOPECLIENT_OUTPUT" ]; then
+        for f in "$BUILD_DIR"/ngscopeclient*.AppImage; do
+            [ -e "$f" ] && { mv -f "$f" "$NGSCOPECLIENT_OUTPUT"; break; }
+        done
+    fi
+    chmod +x "$NGSCOPECLIENT_OUTPUT"
+fi
+
+artifacts=()
+has_product sigrok-bridge && artifacts+=("$SIGROK_BRIDGE_OUTPUT")
+has_product ngscopeclient && artifacts+=("$NGSCOPECLIENT_OUTPUT")
+file "${artifacts[@]}"
+ls -lh "${artifacts[@]}"
+
+printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
+for project in "${projects[@]}"; do
+    printf '%s\n' "${source_state[$project]}" > "$STAMP_DIR/$project"
+done
+ccache --show-stats 2>/dev/null || true

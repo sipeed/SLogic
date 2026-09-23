@@ -14,8 +14,12 @@ on:
   workflow_dispatch:
     inputs:
       products:
-        description: Comma-separated products
+        description: Comma-separated products (legacy sigrok/Qt targets)
         default: pulseview,slogicview,sigrok-cli,all-logic
+      ngscope:
+        description: Also build ngscopeclient + sigrok-bridge (slow; Vulkan/Rust)
+        type: boolean
+        default: false
   push:
     tags:
       - 'release-*'
@@ -25,6 +29,9 @@ permissions:
 
 env:
   PRODUCTS: ${{ github.event.inputs.products || 'pulseview,slogicview,sigrok-cli,all-logic' }}
+  # ngscopeclient + sigrok-bridge are slow (Vulkan C++, Rust building libsigrok
+  # from source): opt in via the dispatch flag, and always on a release tag.
+  NGSCOPE: ${{ github.event_name == 'push' || github.event.inputs.ngscope == 'true' }}
 
 jobs:
   container-targets:
@@ -36,12 +43,14 @@ jobs:
         include:
           - target: linux-x86_64-musl
             env: linux-alpine-3.22
+            products: pulseview,slogicview,sigrok-cli,all-logic
             extra: ''
           # Wine spawns a process per moc/compiler invocation; the all-logic
           # (DSView) build runs autotools + cmake concurrently and overruns the
           # Wine process table at very high parallelism, so keep it modest.
           - target: windows-x86_64-ucrt
             env: windows-msys2-ucrt64
+            products: pulseview,slogicview,sigrok-cli,all-logic
             extra: '--jobs 3'
     steps:
       - uses: actions/checkout@v4
@@ -75,11 +84,68 @@ jobs:
         run: |
           python3 build/scripts/build \
             --target "${{ matrix.target }}" \
-            --product "$PRODUCTS" ${{ matrix.extra }}
+            --product "${{ matrix.products }}" ${{ matrix.extra }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
+          path: artifact/**
+          if-no-files-found: error
+          retention-days: 7
+
+  # ngscopeclient (Vulkan GUI) + sigrok-bridge (Rust) on a glibc Debian
+  # container — they are glibc-validated and do not build on the musl target.
+  # Opt-in (NGSCOPE) because the Vulkan C++ and from-source Rust builds are slow.
+  glibc-target:
+    name: linux-x86_64-glibc
+    if: ${{ github.event_name == 'push' || github.event.inputs.ngscope == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Cache buildenv image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/buildenv-linux-glibc.tar
+          key: buildenv-linux-glibc-${{ hashFiles('build/environments/linux-glibc/**') }}
+
+      - name: Load or build build environment
+        run: |
+          TAR="/tmp/buildenv-linux-glibc.tar"
+          if [ -f "$TAR" ]; then
+            echo "buildenv cache hit -> docker load"
+            docker load -i "$TAR"
+          else
+            echo "buildenv cache miss -> building image"
+            IMG=$(python3 build/scripts/ensure-environment linux-glibc)
+            docker save "$IMG" -o "$TAR"
+          fi
+
+      # cargo registry/git + libsigrok-sys tarballs + ccache persist between runs
+      # (the from-source C build for libsigrok-sys is heavy).
+      - name: Cache build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/out/cache/cargo
+            build/out/cache/libsigrok-sys
+            build/out/cache/ccache/linux-x86_64-glibc
+          key: glibc-caches-${{ hashFiles('sources/sigrok-bridge/Cargo.lock', 'build/environments/linux-glibc/**') }}
+          restore-keys: |
+            glibc-caches-
+
+      - name: Build linux-x86_64-glibc
+        run: |
+          python3 build/scripts/build \
+            --target linux-x86_64-glibc \
+            --product sigrok-bridge,ngscopeclient
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-glibc
           path: artifact/**
           if-no-files-found: error
           retention-days: 7
@@ -94,8 +160,10 @@ jobs:
           fetch-depth: 0
 
       # build-native bundles dylibs with dylibbundler (macdeployqt handles Qt).
+      # molten-vk supplies the runtime Vulkan ICD bundled into the ngscopeclient
+      # .app (only needed when NGSCOPE is on, but harmless otherwise).
       - name: Install packaging tools
-        run: brew install dylibbundler
+        run: brew install dylibbundler molten-vk
 
       # --- dependency prefix ---------------------------------------------------
       # build-native needs SLOGIC_MACOS_PREFIX pointing at a conda prefix holding
@@ -163,7 +231,11 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
           MACOS_NOTARY_PROFILE: slogic-notary
         run: |
-          python3 build/scripts/build --target macos-arm64 --product "$PRODUCTS"
+          products="$PRODUCTS"
+          if [ "$NGSCOPE" = true ]; then
+            products="$products,sigrok-bridge,ngscopeclient"
+          fi
+          python3 build/scripts/build --target macos-arm64 --product "$products"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -181,7 +253,7 @@ jobs:
   # artifacts above (which need a GitHub login to download).
   release:
     if: startsWith(github.ref, 'refs/tags/release-')
-    needs: [container-targets, macos-target]
+    needs: [container-targets, glibc-target, macos-target]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -198,5 +270,6 @@ jobs:
             dist/**/*.exe
             dist/**/*.dmg
             dist/**/*.zip
+            dist/**/*.tar.gz
           fail_on_unmatched_files: true
           generate_release_notes: true

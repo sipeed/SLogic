@@ -61,11 +61,25 @@ has_product() {
     case ",$PRODUCTS," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 
+SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:--}"
+# shellcheck disable=SC1091
+. "$TARGET_DIR/bundle-helpers.sh"
+
+# The legacy sigrok pipeline (libsigrok + Qt PulseView/SLogicView + sigrok-cli,
+# and optionally all-logic) only runs when one of those products is requested,
+# so an ngscope-only build never drags in the Qt/sigrok stack.
+legacy_requested=0
+for p in pulseview slogicview sigrok-cli all-logic; do
+    has_product "$p" && legacy_requested=1
+done
+
 logic_key="${SLOGIC_BUILD_LOGIC_KEY:-unknown}"
 if [ ! -f "$STAMP_DIR/build-logic" ] || [ "$(cat "$STAMP_DIR/build-logic")" != "$logic_key" ]; then
     echo "Build logic changed; invalidating macOS target workspace."
     rm -rf "$BUILD_ROOT/build-darwin" "$BUILD_ROOT/sr-darwin"
 fi
+
+if [ "$legacy_requested" -eq 1 ]; then
 projects=(libsigrok libsigrokdecode pulseview slogicview sigrok-cli)
 has_product all-logic && projects+=(all-logic)
 for project in "${projects[@]}"; do
@@ -671,7 +685,194 @@ codesign --verify --deep --strict --verbose=2 "$SV_APP"
 ls -lh "$OUTPUT/PulseView-SLogic-macos-arm64.dmg" \
     "$OUTPUT/SLogicView-SLogic-macos-arm64.dmg" \
     "$OUTPUT/sigrok-cli-SLogic-macos-arm64.zip"
-printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
 for project in "${projects[@]}"; do
     git -C "$SOURCES/$project" rev-parse HEAD > "$STAMP_DIR/$project"
 done
+fi   # end legacy_requested
+
+# ==========================================================================
+# sigrok-bridge (Rust): a self-contained static binary. Sign both Mach-Os with
+# the hardened runtime and ship as a notarized zip, mirroring the sigrok-cli
+# portable-zip path.
+# ==========================================================================
+if has_product sigrok-bridge; then
+    echo "=== Building sigrok-bridge (macOS) ==="
+    rsync -a --delete --exclude=.git --exclude=build \
+        "$SOURCES/sigrok-bridge/" "$BUILD_ROOT/sigrok-bridge/"
+    cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
+    ( cd "$BUILD_ROOT" && make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
+        RELEASE_VERSION="$RELEASE_VERSION" install-sigrok-bridge )
+
+    BR_STAGE="$BUILD_ROOT/sigrok-bridge-SLogic-macos-arm64"
+    rm -rf "$BR_STAGE"; mkdir -p "$BR_STAGE"
+    cp "$BUILD_ROOT/sr-darwin/bin/sigrok-bridge" "$BR_STAGE/"
+    cp "$BUILD_ROOT/sr-darwin/bin/fake-bridge" "$BR_STAGE/"
+    for b in "$BR_STAGE/sigrok-bridge" "$BR_STAGE/fake-bridge"; do
+        if [ "$SIGN_IDENTITY" = - ]; then
+            codesign --force --sign - "$b"
+        else
+            codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$b"
+        fi
+    done
+    rm -f "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip"
+    ditto -c -k --keepParent "$BR_STAGE" "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip"
+    if [ -n "${MACOS_NOTARY_PROFILE:-}" ] && [ "$SIGN_IDENTITY" != - ]; then
+        xcrun notarytool submit "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip" \
+            --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+    fi
+    git -C "$SOURCES/sigrok-bridge" rev-parse HEAD > "$STAMP_DIR/sigrok-bridge"
+    ls -lh "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip"
+fi
+
+# ==========================================================================
+# ngscopeclient (Vulkan/GLFW GUI): hand-assembled .app following this repo's
+# bundling convention (dylibbundler + close_bundle_dependencies + our own
+# signing/notarization), NOT upstream's cpack Bundle / brew-molten-vk /
+# signing.cmake flow. scopehal resolves resources from the executable dir and
+# <exe_dir>/../share/{ngscopeclient,scopehal} (lib/scopehal/scopehal.cpp:846),
+# so the binary lives at Contents/MacOS and resources at Contents/share.
+# MoltenVK is a runtime Vulkan ICD (not linked): bundle it and point the loader
+# at it via a launcher setting VK_ICD_FILENAMES.
+# NOTE: untestable off-Mac; validate the .app on the build Mac (Vulkan device
+# enumeration, resource discovery) on first run.
+# ==========================================================================
+if has_product ngscopeclient; then
+    echo "=== Building ngscopeclient (macOS) ==="
+    # D3: override the lib submodule to the scopehal fork on the host before rsync.
+    (
+        # shellcheck disable=SC1091
+        . "$BUILD_HOME/common/ngscopeclient-lib.env"
+        wrapper="$SOURCES/ngscopeclient"
+        lib="$wrapper/$LIB_SUBMODULE"
+        # Init the wrapper's submodules at baseline first, THEN override lib to
+        # the fork commit (the wrapper's recursive update would revert lib, so
+        # recurse into lib itself afterwards, not the wrapper).
+        git -C "$wrapper" submodule update --init --recursive
+        if [ "$(git -C "$lib" rev-parse HEAD 2>/dev/null || true)" != "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}" 2>/dev/null || true)" ]; then
+            if ! git -C "$lib" rev-parse --verify --quiet "$LIB_COMMIT^{commit}" >/dev/null 2>&1; then
+                n=0
+                until git -C "$lib" fetch --depth 1 "$LIB_URL" "$LIB_BRANCH"; do
+                    n=$((n + 1))
+                    [ "$n" -ge 3 ] && { echo "scopehal lib fetch failed after $n attempts" >&2; exit 1; }
+                    echo "lib fetch failed (transient?); retry $n/3 in 5s"; sleep 5
+                done
+            fi
+            git -C "$lib" checkout --detach "$LIB_COMMIT"
+            git -C "$lib" submodule update --init --recursive
+        fi
+        test "$(git -C "$lib" rev-parse HEAD)" = "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}")"
+    )
+    rsync -a --delete --exclude=.git --exclude=build \
+        "$SOURCES/ngscopeclient/" "$BUILD_ROOT/ngscopeclient/"
+    cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
+    ( cd "$BUILD_ROOT" && make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
+        NGSCOPECLIENT_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DDISABLE_PCH=ON -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET${BUILD_PREFIX:+ -DCMAKE_PREFIX_PATH=$BUILD_PREFIX} -G Ninja" \
+        install-ngscopeclient )
+
+    NG_APP="$BUILD_ROOT/ngscopeclient.app"
+    NG_CONTENTS="$NG_APP/Contents"
+    rm -rf "$NG_APP"
+    mkdir -p "$NG_CONTENTS/MacOS" "$NG_CONTENTS/Frameworks" "$NG_CONTENTS/Resources" \
+        "$NG_CONTENTS/share/ngscopeclient" "$NG_CONTENTS/share/scopehal" \
+        "$NG_CONTENTS/Resources/vulkan/icd.d"
+    cp "$BUILD_ROOT/sr-darwin/bin/ngscopeclient" "$NG_CONTENTS/MacOS/ngscopeclient-bin"
+    cp "$BUILD_ROOT/sr-darwin/lib/libscopehal.dylib" "$NG_CONTENTS/Frameworks/"
+    cp "$BUILD_ROOT/sr-darwin/lib/libscopeprotocols.dylib" "$NG_CONTENTS/Frameworks/"
+    [ -d "$BUILD_ROOT/sr-darwin/share/ngscopeclient" ] && \
+        cp -a "$BUILD_ROOT/sr-darwin/share/ngscopeclient/." "$NG_CONTENTS/share/ngscopeclient/"
+    [ -d "$BUILD_ROOT/sr-darwin/share/scopehal" ] && \
+        cp -a "$BUILD_ROOT/sr-darwin/share/scopehal/." "$NG_CONTENTS/share/scopehal/"
+
+    # MoltenVK runtime ICD (from the conda prefix, else Homebrew).
+    MOLTENVK_LIB=""
+    for cand in "${BUILD_PREFIX:+$BUILD_PREFIX/lib/libMoltenVK.dylib}" \
+        "$( { brew --prefix molten-vk 2>/dev/null; } )/lib/libMoltenVK.dylib"; do
+        [ -n "$cand" ] && [ -e "$cand" ] && { MOLTENVK_LIB=$cand; break; }
+    done
+    [ -n "$MOLTENVK_LIB" ] || { echo "libMoltenVK.dylib not found (need molten-vk)" >&2; exit 1; }
+    cp "$MOLTENVK_LIB" "$NG_CONTENTS/Frameworks/libMoltenVK.dylib"
+    cat > "$NG_CONTENTS/Resources/vulkan/icd.d/MoltenVK_icd.json" <<'EOF'
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "../../../Frameworks/libMoltenVK.dylib",
+        "api_version": "1.2.0"
+    }
+}
+EOF
+
+    cat > "$NG_CONTENTS/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>ngscopeclient</string>
+  <key>CFBundleExecutable</key><string>ngscopeclient</string>
+  <key>CFBundleIdentifier</key><string>org.ngscopeclient.ngscopeclient</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>ngscopeclient</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$RELEASE_VERSION</string>
+  <key>CFBundleVersion</key><string>$RELEASE_VERSION</string>
+  <key>LSMinimumSystemVersion</key><string>$MACOS_DEPLOYMENT_TARGET</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+EOF
+
+    # Close the Mach-O dependency graph (pulls the Vulkan loader, glfw, etc.),
+    # then a launcher points the loader at the bundled MoltenVK ICD.
+    dylibbundler -of -b -ns -x "$NG_CONTENTS/MacOS/ngscopeclient-bin" \
+        -d "$NG_CONTENTS/Frameworks" -p @executable_path/../Frameworks \
+        -s "$BUILD_ROOT/sr-darwin/lib" -s "${BUILD_PREFIX:-/opt/homebrew}/lib"
+    close_bundle_dependencies "$NG_CONTENTS"
+    verify_deployment_target "$NG_CONTENTS"
+
+    cat > "$BUILD_ROOT/ngscope-launcher.c" <<'EOF'
+#include <mach-o/dyld.h>
+#include <limits.h>
+#include <libgen.h>
+#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+    char path[PATH_MAX], target[PATH_MAX], icd[PATH_MAX];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0) return 126;
+    char *d = dirname(path);   /* Contents/MacOS */
+    snprintf(target, sizeof(target), "%s/ngscopeclient-bin", d);
+    snprintf(icd, sizeof(icd), "%s/../Resources/vulkan/icd.d/MoltenVK_icd.json", d);
+    setenv("VK_ICD_FILENAMES", icd, 1);
+    setenv("VK_DRIVER_FILES", icd, 1);
+    execv(target, argv);
+    return 126;
+}
+EOF
+    clang -mmacosx-version-min="$MACOS_DEPLOYMENT_TARGET" -Os \
+        "$BUILD_ROOT/ngscope-launcher.c" -o "$NG_CONTENTS/MacOS/ngscopeclient"
+
+    # Package a signed, notarized DMG. ngscopeclient needs a GPU/Vulkan to run,
+    # so unlike package_gui_dmg we do not invoke it for a --version smoke check.
+    sign_bundle "$NG_APP"
+    NG_STAGE="$BUILD_ROOT/dmg-stage-ngscopeclient"
+    rm -rf "$NG_STAGE"; mkdir -p "$NG_STAGE"
+    ditto "$NG_APP" "$NG_STAGE/ngscopeclient.app"
+    sign_bundle "$NG_STAGE/ngscopeclient.app"
+    ln -s /Applications "$NG_STAGE/Applications"
+    NG_DMG="$OUTPUT/ngscopeclient-SLogic-macos-arm64.dmg"
+    rm -f "$NG_DMG"
+    hdiutil create -fs HFS+ -format UDZO -volname "ngscopeclient" \
+        -srcfolder "$NG_STAGE" "$NG_DMG"
+    if [ "$SIGN_IDENTITY" = - ]; then
+        codesign --force --sign - "$NG_DMG"
+    else
+        codesign --force --timestamp --sign "$SIGN_IDENTITY" "$NG_DMG"
+    fi
+    if [ -n "${MACOS_NOTARY_PROFILE:-}" ] && [ "$SIGN_IDENTITY" != - ]; then
+        xcrun notarytool submit "$NG_DMG" --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+        xcrun stapler staple "$NG_DMG"
+        xcrun stapler validate "$NG_DMG"
+    fi
+    git -C "$SOURCES/ngscopeclient" rev-parse HEAD > "$STAMP_DIR/ngscopeclient"
+    ls -lh "$NG_DMG"
+fi
+
+printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
