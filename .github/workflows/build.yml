@@ -162,8 +162,12 @@ jobs:
       # build-native bundles dylibs with dylibbundler (macdeployqt handles Qt).
       # molten-vk supplies the runtime Vulkan ICD bundled into the ngscopeclient
       # .app (only needed when NGSCOPE is on, but harmless otherwise).
-      - name: Install packaging tools
-        run: brew install dylibbundler molten-vk
+      # rust -> cargo for sigrok-bridge's libsigrok-sys, and meson for its glib2
+      # build: build-native resets PATH to $PREFIX/bin:/opt/homebrew/bin:... which
+      # drops rustup's ~/.cargo/bin, and the conda prefix ships no meson — both
+      # land in /opt/homebrew/bin (on that PATH) when installed via brew.
+      - name: Install packaging + toolchain
+        run: brew install dylibbundler molten-vk rust meson
 
       # --- dependency prefix ---------------------------------------------------
       # build-native needs SLOGIC_MACOS_PREFIX pointing at a conda prefix holding
