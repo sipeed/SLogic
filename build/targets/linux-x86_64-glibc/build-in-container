@@ -53,6 +53,15 @@ if [ -d /usr/lib/ccache ]; then
     export PATH="/usr/lib/ccache:$PATH"
 fi
 
+# libsigrok source of truth: link the bridge against the repo's own
+# sources/libsigrok (mounted read-only at /sources/libsigrok), unified with
+# PulseView/sigrok-cli, rather than a pinned upstream tarball. libsigrok-sys
+# copies it into OUT_DIR and patches the copy. The host passes LIBSIGROK_SRC_REV
+# (git-in-container can't read the submodule's gitdir) for the rebuild stamp.
+if [ -d "$SOURCE_DIR/libsigrok" ]; then
+    export LIBSIGROK_SRC_DIR="$SOURCE_DIR/libsigrok"
+fi
+
 echo "=== ngscope glibc Build (Debian 12) ==="
 echo "Toolchain: $(cc --version | head -n 1); libc: glibc; jobs: $JOBS; type: $BUILD_TYPE"
 command -v cargo >/dev/null && echo "Rust: $(cargo --version)"
@@ -75,14 +84,17 @@ if [ "${#build_targets[@]}" -gt 0 ]; then
     # Build sequentially: cargo and cmake+ninja each already saturate the cores,
     # and the C-from-source libsigrok-sys step is heavy.
     for goal in "${build_targets[@]}"; do
-        make JOBS="$JOBS" BUILD_TYPE="$BUILD_TYPE" RELEASE_VERSION="$RELEASE_VERSION" "$goal"
+        make JOBS="$JOBS" BUILD_TYPE="$BUILD_TYPE" RELEASE_VERSION="$RELEASE_VERSION" \
+            NGSCOPECLIENT_PKG_VERSION="${NGSCOPECLIENT_PKG_VERSION:-}" \
+            NGSCOPECLIENT_PKG_VERSION_LONG="${NGSCOPECLIENT_PKG_VERSION_LONG:-}" \
+            "$goal"
     done
 else
     echo "[2/4] Reusing all selected product builds."
 fi
 
 # ---- packaging ------------------------------------------------------------
-SIGROK_BRIDGE_OUTPUT="$OUTPUT_DIR/sigrok-bridge-SLogic-linux-x86_64-glibc.tar.gz"
+SIGROK_BRIDGE_OUTPUT="$OUTPUT_DIR/sigrok-bridge-SLogic-linux-x86_64-glibc"
 NGSCOPECLIENT_OUTPUT="$OUTPUT_DIR/ngscopeclient-SLogic-linux-x86_64-glibc.AppImage"
 sigrok_bridge_package=0
 ngscopeclient_package=0
@@ -92,9 +104,9 @@ has_product ngscopeclient && { [ "${product_build[ngscopeclient]}" -eq 1 ] || [ 
 mkdir -p "$OUTPUT_DIR"
 
 if [ "$sigrok_bridge_package" -eq 1 ]; then
-    echo "[3/4] Packaging sigrok-bridge (glibc-only static tarball)..."
+    echo "[3/4] Packaging sigrok-bridge (single glibc binary)..."
     rm -f "$SIGROK_BRIDGE_OUTPUT"
-    tar -czf "$SIGROK_BRIDGE_OUTPUT" -C sr/bin sigrok-bridge fake-bridge
+    install -Dm755 sr/bin/sigrok-bridge "$SIGROK_BRIDGE_OUTPUT"
 fi
 
 create_ngscopeclient_appdir() {
@@ -163,13 +175,21 @@ if [ "$ngscopeclient_package" -eq 1 ]; then
     # NO_STRIP: newer glibc libs use .relr.dyn which linuxdeploy's bundled strip
     # can't handle; glibc has the relocation types natively so the ELF stays valid.
     # APPIMAGE_EXTRACT_AND_RUN: no FUSE inside the container.
+    # --exclude-library libvulkan: never ship the Vulkan loader — only the host's
+    # is wired to the host GPU's ICD. A bundled loader hands back NULL dispatch
+    # pointers and the app crashes calling one in VulkanWindow::UpdateFramebuffer();
+    # ld.so resolves the NEEDED entry from the host's libvulkan.so.1 instead.
+    # Single deploy+package call: the appimage plugin invoked standalone trips a
+    # mksquashfs -offset bug on Debian 13, but `linuxdeploy --output appimage` is fine.
     ( cd "$BUILD_DIR" && NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT="$NGSCOPECLIENT_OUTPUT" \
+        LDAI_RUNTIME_FILE=/usr/local/share/runtime-x86_64 \
         linuxdeploy --appdir "$NG_APPDIR" \
             --executable "$NG_APPDIR/usr/bin/ngscopeclient" \
             --library "$NG_APPDIR/usr/lib/libscopehal.so" \
             --library "$NG_APPDIR/usr/lib/libscopeprotocols.so" \
             --desktop-file "$NG_APPDIR/usr/share/applications/ngscopeclient.desktop" \
             --icon-file "$NG_APPDIR/ngscopeclient.png" \
+            --exclude-library 'libvulkan.so.1' \
             --output appimage )
     # linuxdeploy honours $OUTPUT for the appimage path; fall back to CWD glob.
     if [ ! -s "$NGSCOPECLIENT_OUTPUT" ]; then

@@ -30,3 +30,7 @@
 	path = sources/ngscopeclient
 	url = https://github.com/ngscopeclient/scopehal-apps.git
 	branch = master
+[submodule "sources/scopehal"]
+	path = sources/scopehal
+	url = https://github.com/sipeed/scopehal.git
+	branch = feat/SLogic

@@ -700,14 +700,23 @@ if has_product sigrok-bridge; then
     rsync -a --delete --exclude=.git --exclude=build \
         "$SOURCES/sigrok-bridge/" "$BUILD_ROOT/sigrok-bridge/"
     cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
-    ( cd "$BUILD_ROOT" && make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
+    # Link the bridge against the repo's own sources/libsigrok (unified source),
+    # not a pinned upstream tarball. Only sigrok-bridge is rsynced here, so point
+    # libsigrok-sys at the original checkout and pass its rev for the build stamp.
+    libsigrok_src_rev="unknown"
+    if git -C "$SOURCES/libsigrok" rev-parse --git-dir >/dev/null 2>&1; then
+        libsigrok_src_rev=$(git -C "$SOURCES/libsigrok" rev-parse HEAD)
+        [ -z "$(git -C "$SOURCES/libsigrok" status --porcelain)" ] || libsigrok_src_rev="$libsigrok_src_rev-dirty"
+    fi
+    ( cd "$BUILD_ROOT" && \
+        LIBSIGROK_SRC_DIR="$SOURCES/libsigrok" LIBSIGROK_SRC_REV="$libsigrok_src_rev" \
+        make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
         RELEASE_VERSION="$RELEASE_VERSION" install-sigrok-bridge )
 
     BR_STAGE="$BUILD_ROOT/sigrok-bridge-SLogic-macos-arm64"
     rm -rf "$BR_STAGE"; mkdir -p "$BR_STAGE"
     cp "$BUILD_ROOT/sr-darwin/bin/sigrok-bridge" "$BR_STAGE/"
-    cp "$BUILD_ROOT/sr-darwin/bin/fake-bridge" "$BR_STAGE/"
-    for b in "$BR_STAGE/sigrok-bridge" "$BR_STAGE/fake-bridge"; do
+    for b in "$BR_STAGE/sigrok-bridge"; do
         if [ "$SIGN_IDENTITY" = - ]; then
             codesign --force --sign - "$b"
         else
@@ -738,35 +747,34 @@ fi
 # ==========================================================================
 if has_product ngscopeclient; then
     echo "=== Building ngscopeclient (macOS) ==="
-    # D3: override the lib submodule to the scopehal fork on the host before rsync.
+    # D3: overlay the scopehal fork (sources/scopehal submodule) onto the
+    # wrapper's lib on the host before rsync — no build-time network fetch.
     (
         # shellcheck disable=SC1091
         . "$BUILD_HOME/common/ngscopeclient-lib.env"
         wrapper="$SOURCES/ngscopeclient"
+        scopehal="$SOURCES/scopehal"
         lib="$wrapper/$LIB_SUBMODULE"
-        # Init the wrapper's submodules at baseline first, THEN override lib to
-        # the fork commit (the wrapper's recursive update would revert lib, so
-        # recurse into lib itself afterwards, not the wrapper).
-        git -C "$wrapper" submodule update --init --recursive
-        if [ "$(git -C "$lib" rev-parse HEAD 2>/dev/null || true)" != "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}" 2>/dev/null || true)" ]; then
-            if ! git -C "$lib" rev-parse --verify --quiet "$LIB_COMMIT^{commit}" >/dev/null 2>&1; then
-                n=0
-                until git -C "$lib" fetch --depth 1 "$LIB_URL" "$LIB_BRANCH"; do
-                    n=$((n + 1))
-                    [ "$n" -ge 3 ] && { echo "scopehal lib fetch failed after $n attempts" >&2; exit 1; }
-                    echo "lib fetch failed (transient?); retry $n/3 in 5s"; sleep 5
-                done
-            fi
-            git -C "$lib" checkout --detach "$LIB_COMMIT"
-            git -C "$lib" submodule update --init --recursive
-        fi
-        test "$(git -C "$lib" rev-parse HEAD)" = "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}")"
+        test -d "$scopehal/.git" -o -f "$scopehal/.git" || {
+            echo "sources/scopehal not checked out — run: git submodule update --init --recursive sources/scopehal" >&2
+            exit 1
+        }
+        git -C "$scopehal" submodule update --init --recursive
+        # Init the wrapper's OTHER submodules but skip its `lib` gitlink; overlay
+        # lib from sources/scopehal (with its nested submodule content).
+        git -C "$wrapper" -c submodule."$LIB_SUBMODULE".update=none submodule update --init --recursive
+        mkdir -p "$lib"
+        rsync -a --delete --exclude='.git' "$scopehal/" "$lib/"
     )
+    # scopehal-apps versions itself from `git describe`; the build copy has no
+    # .git, so compute the version on the host and pass it to CMake.
+    NG_VER=$(git -C "$SOURCES/ngscopeclient" describe --always --tags 2>/dev/null || echo v0.0.0-0)
+    NG_VER_LONG=$(git -C "$SOURCES/ngscopeclient" describe --always --tags --long 2>/dev/null || echo v0.0.0-0-g0000000)
     rsync -a --delete --exclude=.git --exclude=build \
         "$SOURCES/ngscopeclient/" "$BUILD_ROOT/ngscopeclient/"
     cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
     ( cd "$BUILD_ROOT" && make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
-        NGSCOPECLIENT_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DDISABLE_PCH=ON -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET${BUILD_PREFIX:+ -DCMAKE_PREFIX_PATH=$BUILD_PREFIX} -G Ninja" \
+        NGSCOPECLIENT_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DDISABLE_PCH=ON -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET${BUILD_PREFIX:+ -DCMAKE_PREFIX_PATH=$BUILD_PREFIX} -DNGSCOPECLIENT_PACKAGE_VERSION=$NG_VER -DNGSCOPECLIENT_PACKAGE_VERSION_LONG=$NG_VER_LONG -G Ninja" \
         install-ngscopeclient )
 
     NG_APP="$BUILD_ROOT/ngscopeclient.app"

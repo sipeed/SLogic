@@ -34,7 +34,7 @@ for product in "${product_list[@]}"; do
     case "$product" in sigrok-bridge|ngscopeclient) ;; *) echo "Unsupported glibc product: $product" >&2; exit 2 ;; esac
     test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
 done
-case ",$PRODUCTS," in *,sigrok-bridge,*) ;; *) rm -f "$OUTPUT/sigrok-bridge-SLogic-linux-x86_64-glibc.tar.gz" ;; esac
+case ",$PRODUCTS," in *,sigrok-bridge,*) ;; *) rm -f "$OUTPUT/sigrok-bridge-SLogic-linux-x86_64-glibc" ;; esac
 case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLogic-linux-x86_64-glibc.AppImage" ;; esac
 
 # The ngscopeclient wrapper is pure-upstream scopehal-apps; its `lib` submodule
@@ -44,32 +44,25 @@ case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLog
 # clean-check (which ignores submodule state for override components) still holds.
 override_ngscopeclient_lib() {
     local wrapper="$SOURCES/ngscopeclient"
+    local scopehal="$SOURCES/scopehal"
     # shellcheck disable=SC1091
     . "$BUILD_HOME/common/ngscopeclient-lib.env"
     local lib="$wrapper/$LIB_SUBMODULE"
-    # Init the wrapper's submodules at their recorded baseline first (this pins
-    # lib to the upstream gitlink), THEN override lib to the fork commit. Doing
-    # the wrapper's recursive update AFTER the checkout would revert lib.
-    git -C "$wrapper" submodule update --init --recursive
-    if [ "$(git -C "$lib" rev-parse HEAD 2>/dev/null || true)" != "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}" 2>/dev/null || true)" ]; then
-        echo "Overriding scopehal lib -> $LIB_URL $LIB_BRANCH ($LIB_COMMIT)"
-        # Fetch only if the pinned commit isn't already in the object store
-        # (avoids a network round-trip on re-runs); retry transient failures.
-        if ! git -C "$lib" rev-parse --verify --quiet "$LIB_COMMIT^{commit}" >/dev/null 2>&1; then
-            n=0
-            until git -C "$lib" fetch --depth 1 "$LIB_URL" "$LIB_BRANCH"; do
-                n=$((n + 1))
-                [ "$n" -ge 3 ] && { echo "scopehal lib fetch failed after $n attempts" >&2; exit 1; }
-                echo "lib fetch failed (transient?); retry $n/3 in 5s"; sleep 5
-            done
-        fi
-        git -C "$lib" checkout --detach "$LIB_COMMIT"
-        # Reconcile lib's own nested submodules to the fork commit (not the
-        # wrapper's, which would reset lib back to the baseline).
-        git -C "$lib" submodule update --init --recursive
-    fi
-    test "$(git -C "$lib" rev-parse HEAD)" = "$(git -C "$lib" rev-parse "$LIB_COMMIT^{commit}")" \
-        || { echo "scopehal lib override did not land on $LIB_COMMIT" >&2; exit 1; }
+    test -d "$scopehal/.git" -o -f "$scopehal/.git" || {
+        echo "sources/scopehal not checked out — run: git submodule update --init --recursive sources/scopehal" >&2
+        exit 1
+    }
+    # Ensure the scopehal fork + its nested submodules (xptools/log/VkFFT/
+    # canvas_ity) are populated; idempotent on re-runs.
+    git -C "$scopehal" submodule update --init --recursive
+    # Init the wrapper's OTHER submodules (imgui, nativefiledialog, ...) but skip
+    # its `lib` gitlink — we overlay lib from sources/scopehal instead of pulling
+    # upstream scopehal, so no build-time network fetch of the fork.
+    git -C "$wrapper" -c submodule."$LIB_SUBMODULE".update=none submodule update --init --recursive
+    # Overlay the SLogic scopehal fork onto the wrapper's lib. --exclude=.git
+    # copies the nested submodules' content as plain trees.
+    mkdir -p "$lib"
+    rsync -a --delete --exclude='.git' "$scopehal/" "$lib/"
 }
 case ",$PRODUCTS," in *,ngscopeclient,*) override_ngscopeclient_lib ;; esac
 
@@ -77,7 +70,18 @@ mkdir -p "$CACHE/ccache/linux-x86_64-glibc" \
     "$CACHE/cargo/linux-x86_64-glibc/registry" \
     "$CACHE/cargo/linux-x86_64-glibc/git" \
     "$CACHE/libsigrok-sys" \
+    "$CACHE/downloads" \
     "$OUTPUT" "$(dirname "$OUT")"
+# AppImage runtime for linuxdeploy's appimage plugin — pre-fetch and mount it so
+# packaging doesn't depend on the plugin's flaky build-time GitHub download.
+RUNTIME="$CACHE/downloads/runtime-x86_64"
+if [ ! -s "$RUNTIME" ]; then
+    echo "Downloading AppImage runtime"
+    curl --fail --location --retry 3 \
+        https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64 \
+        --output "$RUNTIME"
+    chmod +x "$RUNTIME"
+fi
 if [ "$CLEAN" -eq 1 ]; then
     echo "Cleaning target workspace: $OUT"
     rm -rf "$OUT"
@@ -105,6 +109,23 @@ if [ -f "$BUILD_HOME/common/ngscopeclient-lib.env" ]; then
     # shellcheck disable=SC1091
     . "$BUILD_HOME/common/ngscopeclient-lib.env"
 fi
+# libsigrok is a sibling submodule the bridge now links against (unified source).
+# Fold its rev into the bridge's rebuild trigger and hand it to libsigrok-sys for
+# the build stamp (in-container git can't read the submodule's gitdir).
+libsigrok_src_rev="unknown"
+if git -C "$SOURCES/libsigrok" rev-parse --git-dir >/dev/null 2>&1; then
+    libsigrok_src_rev=$(git -C "$SOURCES/libsigrok" rev-parse HEAD)
+    [ -z "$(git -C "$SOURCES/libsigrok" status --porcelain)" ] || libsigrok_src_rev="$libsigrok_src_rev-dirty"
+fi
+
+# scopehal is a sibling submodule overlaid into ngscopeclient/lib (unified source).
+# Fold its rev into ngscopeclient's rebuild trigger so editing scopehal rebuilds.
+scopehal_src_rev="unknown"
+if git -C "$SOURCES/scopehal" rev-parse --git-dir >/dev/null 2>&1; then
+    scopehal_src_rev=$(git -C "$SOURCES/scopehal" rev-parse HEAD)
+    [ -z "$(git -C "$SOURCES/scopehal" status --porcelain)" ] || scopehal_src_rev="$scopehal_src_rev-dirty"
+fi
+
 for project in sigrok-bridge ngscopeclient; do
     variable="SOURCE_${project^^}_STATE"
     variable=${variable//-/_}
@@ -112,15 +133,24 @@ for project in sigrok-bridge ngscopeclient; do
     if git -C "$SOURCES/$project" rev-parse --git-dir >/dev/null 2>&1; then
         head=$(git -C "$SOURCES/$project" rev-parse HEAD)
         if [ "$project" = ngscopeclient ]; then
-            state="${head}+lib-${LIB_COMMIT:-unknown}"
+            state="${head}+scopehal-${scopehal_src_rev}"
             [ -z "$(git -C "$SOURCES/$project" status --porcelain --ignore-submodules=all)" ] || state="$state-dirty"
         else
-            state="$head"
+            state="${head}+libsigrok-${libsigrok_src_rev}"
             [ -z "$(git -C "$SOURCES/$project" status --porcelain)" ] || state="$state-dirty"
         fi
     fi
     source_env+=( -e "$variable=$state" )
 done
+source_env+=( -e "LIBSIGROK_SRC_REV=$libsigrok_src_rev" )
+
+# scopehal-apps versions itself from `git describe`, but sources are synced into
+# the container without .git; compute the version on the host and pass it in so
+# CMake skips git (see build/common/Makefile ngscopeclient block).
+if git -C "$SOURCES/ngscopeclient" rev-parse --git-dir >/dev/null 2>&1; then
+    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION=$(git -C "$SOURCES/ngscopeclient" describe --always --tags 2>/dev/null)" )
+    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION_LONG=$(git -C "$SOURCES/ngscopeclient" describe --always --tags --long 2>/dev/null)" )
+fi
 
 "$ENGINE" run --rm \
     --cpus="$CPUS" \
@@ -140,5 +170,6 @@ done
     -v "$CACHE/cargo/linux-x86_64-glibc/registry:/opt/rust/cargo/registry" \
     -v "$CACHE/cargo/linux-x86_64-glibc/git:/opt/rust/cargo/git" \
     -v "$CACHE/libsigrok-sys:/cache/libsigrok-sys" \
+    -v "$RUNTIME:/usr/local/share/runtime-x86_64:ro" \
     -v "$OUTPUT:/output" \
     "$IMAGE" bash /target/build-in-container

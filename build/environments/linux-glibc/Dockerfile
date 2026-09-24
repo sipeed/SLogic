@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         patchelf \
         squashfs-tools \
         desktop-file-utils \
+        lsb-release \
         libvulkan-dev \
         vulkan-tools \
         libglfw3-dev \
@@ -43,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         spirv-tools \
         spirv-headers \
         libshaderc-dev \
+        glslc \
         libhidapi-dev \
         libfftw3-dev \
         catch2 \

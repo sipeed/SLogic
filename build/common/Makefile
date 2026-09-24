@@ -98,6 +98,12 @@ ALL_LOGIC_CONFIGURE_OPTS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 # submodule (the scopehal fork). Only on the glibc Linux target and macOS.
 NGSCOPECLIENT_BUILD_SYSTEM = cmake
 NGSCOPECLIENT_CONFIGURE_OPTS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DDISABLE_PCH=ON -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -G Ninja
+# scopehal-apps derives its version from `git describe`, but sources are synced
+# into the build without .git; the host driver computes the version and passes
+# it in so CMake skips git (see build/targets/*/build[-in-container]).
+ifneq ($(strip $(NGSCOPECLIENT_PKG_VERSION)),)
+NGSCOPECLIENT_CONFIGURE_OPTS += -DNGSCOPECLIENT_PACKAGE_VERSION=$(NGSCOPECLIENT_PKG_VERSION) -DNGSCOPECLIENT_PACKAGE_VERSION_LONG=$(NGSCOPECLIENT_PKG_VERSION_LONG)
+endif
 # sigrok-bridge (Rust): libsigrok-sys builds its own static libsigrok + C deps.
 CARGO ?= cargo
 CARGO_BUILD_FLAGS ?= --release
@@ -352,14 +358,13 @@ configure-sigrok-bridge: $(SIGROK_BRIDGE_DIR)
 
 build-sigrok-bridge: $(SIGROK_BRIDGE_DIR) $(TOOLCHAIN_STAMP)
 	@$(RSYNC_CARGO_REFRESH) sigrok-bridge/ $(SIGROK_BRIDGE_DIR)/
-	@echo "[sigrok-bridge] cargo build $(CARGO_BUILD_FLAGS) -p sigrok-bridge -p fake-bridge"
-	cd $(SIGROK_BRIDGE_DIR) && $(CARGO) build $(CARGO_BUILD_FLAGS) -p sigrok-bridge -p fake-bridge
+	@echo "[sigrok-bridge] cargo build $(CARGO_BUILD_FLAGS) -p sigrok-bridge"
+	cd $(SIGROK_BRIDGE_DIR) && $(CARGO) build $(CARGO_BUILD_FLAGS) -p sigrok-bridge
 
 install-sigrok-bridge: build-sigrok-bridge
 	@echo "[sigrok-bridge] Installing to $(PREFIX)..."
 	@mkdir -p $(PREFIX)/bin
 	cp $(SIGROK_BRIDGE_DIR)/target/release/sigrok-bridge$(EXE_SUFFIX) $(PREFIX)/bin/
-	cp $(SIGROK_BRIDGE_DIR)/target/release/fake-bridge$(EXE_SUFFIX) $(PREFIX)/bin/
 
 clean-sigrok-bridge:
 	@echo "[sigrok-bridge] Cleaning..."
