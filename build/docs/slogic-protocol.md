@@ -52,7 +52,7 @@ array order (section 6.1); the pairs themselves are identical.
 | Model    | 4 ch      | 8 ch     | 16 ch    | 32 ch    |
 |----------|-----------|----------|----------|----------|
 | 16U3     | 800 MHz   | 400 MHz  | 200 MHz  | —        |
-| 32U3     | 1600 MHz  | 800 MHz  | 400 MHz  | 200 MHz  |
+| 32U3     | 1400 MHz  | 800 MHz  | 400 MHz  | 200 MHz  |
 
 Combo 8: 2 ch → 160 MHz, 4 ch → 80 MHz, 8 ch → 40 MHz.
 
