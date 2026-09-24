@@ -697,7 +697,9 @@ fi   # end legacy_requested
 # ==========================================================================
 if has_product sigrok-bridge; then
     echo "=== Building sigrok-bridge (macOS) ==="
-    rsync -a --delete --exclude=.git --exclude=build \
+    # Exclude the cargo output (/target), NOT "build": libsigrok-sys/build/ holds
+    # the crate's build scripts (common.rs/deps.rs) that the build must read.
+    rsync -a --delete --exclude=.git --exclude=/target \
         "$SOURCES/sigrok-bridge/" "$BUILD_ROOT/sigrok-bridge/"
     cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
     # Link the bridge against the repo's own sources/libsigrok (unified source),
@@ -708,7 +710,19 @@ if has_product sigrok-bridge; then
         libsigrok_src_rev=$(git -C "$SOURCES/libsigrok" rev-parse HEAD)
         [ -z "$(git -C "$SOURCES/libsigrok" status --porcelain)" ] || libsigrok_src_rev="$libsigrok_src_rev-dirty"
     fi
+    # Isolate the bridge/glib build from the conda prefix. build-native exports
+    # CPPFLAGS=-I$PREFIX/include (and -L$PREFIX/lib) for the Qt/sigrok deps, but
+    # libsigrok-sys bootstraps its OWN glib/libffi/pcre2/... into OUT_DIR. If the
+    # conda include leaks in, glib compiles against conda's GNU iconv.h/libintl.h
+    # (which macro-rename to libiconv_*/libintl_* prefixed symbols) and then fails
+    # to link against macOS's BSD iconv / absent gettext. Drop the conda -I/-L so
+    # glib uses the macOS SDK's plain iconv and no external gettext (self-contained).
     ( cd "$BUILD_ROOT" && \
+        CFLAGS="-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET" \
+        CXXFLAGS="-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET" \
+        CPPFLAGS="" \
+        LDFLAGS="-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET -Wl,-headerpad_max_install_names" \
+        PKG_CONFIG_PATH="" CMAKE_PREFIX_PATH="" \
         LIBSIGROK_SRC_DIR="$SOURCES/libsigrok" LIBSIGROK_SRC_REV="$libsigrok_src_rev" \
         make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
         RELEASE_VERSION="$RELEASE_VERSION" install-sigrok-bridge )
@@ -773,8 +787,16 @@ if has_product ngscopeclient; then
     rsync -a --delete --exclude=.git --exclude=build \
         "$SOURCES/ngscopeclient/" "$BUILD_ROOT/ngscopeclient/"
     cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
-    ( cd "$BUILD_ROOT" && make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
-        NGSCOPECLIENT_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DDISABLE_PCH=ON -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET${BUILD_PREFIX:+ -DCMAKE_PREFIX_PATH=$BUILD_PREFIX} -DNGSCOPECLIENT_PACKAGE_VERSION=$NG_VER -DNGSCOPECLIENT_PACKAGE_VERSION_LONG=$NG_VER_LONG -G Ninja" \
+    # ngscopeclient's deps (yaml-cpp, glfw, glslang, shaderc, spirv-tools, vulkan-*)
+    # live in Homebrew, not the conda prefix, so add /opt/homebrew to the CMake +
+    # pkg-config search. CMAKE_PREFIX_PATH is passed via the environment (colon-sep)
+    # rather than -D so a Homebrew path with ';' can't be mis-split by the Makefile's
+    # shell. Homebrew's libomp is keg-only, so point OpenMP_ROOT at it.
+    ( cd "$BUILD_ROOT" && \
+        CMAKE_PREFIX_PATH="${BUILD_PREFIX:+$BUILD_PREFIX:}/opt/homebrew" \
+        PKG_CONFIG_PATH="${BUILD_PREFIX:+$BUILD_PREFIX/lib/pkgconfig:}/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig" \
+        make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
+        NGSCOPECLIENT_CONFIGURE_OPTS="-DCMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} -DDISABLE_PCH=ON -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET -DOpenMP_ROOT=/opt/homebrew/opt/libomp -DCMAKE_CXX_FLAGS=-Wno-unknown-attributes -DNGSCOPECLIENT_PACKAGE_VERSION=$NG_VER -DNGSCOPECLIENT_PACKAGE_VERSION_LONG=$NG_VER_LONG -G Ninja" \
         install-ngscopeclient )
 
     NG_APP="$BUILD_ROOT/ngscopeclient.app"
@@ -831,7 +853,8 @@ EOF
     # then a launcher points the loader at the bundled MoltenVK ICD.
     dylibbundler -of -b -ns -x "$NG_CONTENTS/MacOS/ngscopeclient-bin" \
         -d "$NG_CONTENTS/Frameworks" -p @executable_path/../Frameworks \
-        -s "$BUILD_ROOT/sr-darwin/lib" -s "${BUILD_PREFIX:-/opt/homebrew}/lib"
+        -s "$BUILD_ROOT/sr-darwin/lib" -s "${BUILD_PREFIX:-/opt/homebrew}/lib" \
+        -s /opt/homebrew/lib
     close_bundle_dependencies "$NG_CONTENTS"
     verify_deployment_target "$NG_CONTENTS"
 
@@ -841,6 +864,7 @@ EOF
 #include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>   /* execv */
 int main(int argc, char **argv) {
     char path[PATH_MAX], target[PATH_MAX], icd[PATH_MAX];
     uint32_t size = sizeof(path);

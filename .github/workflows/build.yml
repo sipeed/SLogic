@@ -20,6 +20,14 @@ on:
         description: Also build ngscopeclient + sigrok-bridge (slow; Vulkan/Rust)
         type: boolean
         default: false
+      macos_only:
+        description: Build only the macOS target (skip Linux musl/glibc + Windows)
+        type: boolean
+        default: false
+      ngscope_only:
+        description: macOS only — build just ngscopeclient + sigrok-bridge (skip the Qt GUIs)
+        type: boolean
+        default: false
   push:
     tags:
       - 'release-*'
@@ -35,6 +43,7 @@ env:
 
 jobs:
   container-targets:
+    if: ${{ github.event.inputs.macos_only != 'true' && github.event.inputs.ngscope_only != 'true' }}
     name: ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
@@ -98,7 +107,7 @@ jobs:
   # Opt-in (NGSCOPE) because the Vulkan C++ and from-source Rust builds are slow.
   glibc-target:
     name: linux-x86_64-glibc
-    if: ${{ github.event_name == 'push' || github.event.inputs.ngscope == 'true' }}
+    if: ${{ (github.event_name == 'push' || github.event.inputs.ngscope == 'true') && github.event.inputs.macos_only != 'true' && github.event.inputs.ngscope_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -162,12 +171,22 @@ jobs:
       # build-native bundles dylibs with dylibbundler (macdeployqt handles Qt).
       # molten-vk supplies the runtime Vulkan ICD bundled into the ngscopeclient
       # .app (only needed when NGSCOPE is on, but harmless otherwise).
-      # rust -> cargo for sigrok-bridge's libsigrok-sys, and meson for its glib2
-      # build: build-native resets PATH to $PREFIX/bin:/opt/homebrew/bin:... which
-      # drops rustup's ~/.cargo/bin, and the conda prefix ships no meson — both
-      # land in /opt/homebrew/bin (on that PATH) when installed via brew.
+      # rust -> cargo for sigrok-bridge's libsigrok-sys: build-native resets PATH to
+      # $PREFIX/bin:/opt/homebrew/bin:... which drops rustup's ~/.cargo/bin, so brew's
+      # cargo (in /opt/homebrew/bin, on that PATH) is what it finds. meson is NOT from
+      # brew here: brew meson runs under its own venv python that lacks the `packaging`
+      # module glib2's meson build requires. It is installed into the conda prefix
+      # instead (next step) so it runs under the prefix python, which has packaging.
+      # ngscopeclient's own deps (glfw/glslang/shaderc/spirv-tools/vulkan-*/yaml-cpp/
+      # libomp/catch2) are NOT in the conda-lock (which only covers the Qt trio), so
+      # they come from Homebrew and build-native points ngscopeclient's CMake at
+      # /opt/homebrew. On this macos-14 runner brew bottles are minOS<=14, which
+      # passes the bundle's 15.0 deployment-target check.
       - name: Install packaging + toolchain
-        run: brew install dylibbundler molten-vk rust meson
+        run: |
+          brew install dylibbundler molten-vk rust \
+            glfw glslang shaderc spirv-tools vulkan-headers vulkan-loader \
+            yaml-cpp libomp catch2 hidapi
 
       # --- dependency prefix ---------------------------------------------------
       # build-native needs SLOGIC_MACOS_PREFIX pointing at a conda prefix holding
@@ -190,6 +209,18 @@ jobs:
             | tar -xj -C "$RUNNER_TEMP" bin/micromamba
           "$RUNNER_TEMP/bin/micromamba" create -y -p "$HOME/macos15-env" \
             -f build/environments/macos-xcode/conda-lock.txt
+
+      # meson is not pinned in conda-lock; add it to the prefix so it runs under the
+      # prefix python (which has `packaging`, required by glib2's meson build). Runs
+      # every time (idempotent) since the prefix may be a cache hit with no micromamba.
+      - name: Add meson to the dependency prefix
+        run: |
+          MAMBA="$RUNNER_TEMP/bin/micromamba"
+          if [ ! -x "$MAMBA" ]; then
+            curl -Ls https://micro.mamba.pm/api/micromamba/osx-arm64/latest \
+              | tar -xj -C "$RUNNER_TEMP" bin/micromamba
+          fi
+          "$MAMBA" install -y -p "$HOME/macos15-env" -c conda-forge meson
 
       - name: Export prefix path
         run: echo "SLOGIC_MACOS_PREFIX=$HOME/macos15-env" >> "$GITHUB_ENV"
@@ -235,9 +266,13 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
           MACOS_NOTARY_PROFILE: slogic-notary
         run: |
-          products="$PRODUCTS"
-          if [ "$NGSCOPE" = true ]; then
-            products="$products,sigrok-bridge,ngscopeclient"
+          if [ "${{ github.event.inputs.ngscope_only }}" = true ]; then
+            products="sigrok-bridge,ngscopeclient"
+          else
+            products="$PRODUCTS"
+            if [ "$NGSCOPE" = true ]; then
+              products="$products,sigrok-bridge,ngscopeclient"
+            fi
           fi
           python3 build/scripts/build --target macos-arm64 --product "$products"
 

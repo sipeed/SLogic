@@ -26,17 +26,25 @@ if [ -z "$SOURCES" ] || [ -z "$OUTPUT" ]; then
     exit 2
 fi
 
-# The two GUI bundles and CLI archive reuse one prepared dependency graph,
-# so macOS always builds the coupled trio; additional products (all-logic)
-# join on top of it.
-expanded=0
-for required in pulseview slogicview sigrok-cli; do
-    case ",$PRODUCTS," in
-        *,$required,*) ;;
-        *) PRODUCTS="$PRODUCTS,$required"; expanded=1 ;;
-    esac
+# The two GUI bundles and CLI archive reuse one prepared dependency graph, so
+# whenever ANY of the trio is requested macOS builds all three together (all-logic
+# joins on top). A pure ngscope build (sigrok-bridge / ngscopeclient only) must NOT
+# drag in the Qt/sigrok trio — that is ~15 min of wasted work — so only couple them
+# when at least one trio member was actually requested.
+trio_requested=0
+for member in pulseview slogicview sigrok-cli; do
+    case ",$PRODUCTS," in *,$member,*) trio_requested=1 ;; esac
 done
-[ "$expanded" -eq 0 ] || echo "macos-arm64 packages pulseview, slogicview and sigrok-cli together; building: $PRODUCTS"
+if [ "$trio_requested" -eq 1 ]; then
+    expanded=0
+    for required in pulseview slogicview sigrok-cli; do
+        case ",$PRODUCTS," in
+            *,$required,*) ;;
+            *) PRODUCTS="$PRODUCTS,$required"; expanded=1 ;;
+        esac
+    done
+    [ "$expanded" -eq 0 ] || echo "macos-arm64 packages pulseview, slogicview and sigrok-cli together; building: $PRODUCTS"
+fi
 
 [ "$(uname -s)" = Darwin ] || { echo "macos-arm64 must be built on macOS" >&2; exit 2; }
 [ "$(uname -m)" = arm64 ] || { echo "macos-arm64 requires an Apple Silicon host" >&2; exit 2; }
