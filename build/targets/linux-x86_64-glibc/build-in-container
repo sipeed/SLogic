@@ -7,7 +7,7 @@ BUILD_DIR=/workspace
 OUTPUT_DIR=/output
 JOBS="${BUILD_JOBS:-${JOBS:-$(nproc)}}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
-PRODUCTS="${PRODUCTS:-sigrok-bridge,ngscopeclient}"
+PRODUCTS="${PRODUCTS:-ngscopeclient}"
 RELEASE_VERSION="${RELEASE_VERSION:-0.0.0-dev}"
 
 has_product() {
@@ -24,7 +24,7 @@ fi
 
 # Source states come from the host as SOURCE_<NAME>_STATE. A change (commit or
 # -dirty) forces an incremental rebuild of that product; a commit change removes
-# its build tree. Both products are self-contained (no shared sigrok prefix).
+# its build tree.
 state_of() {
     local variable="SOURCE_${1^^}_STATE"
     variable=${variable//-/_}
@@ -32,7 +32,7 @@ state_of() {
 }
 
 declare -A source_state product_build
-for product in sigrok-bridge ngscopeclient; do
+for product in ngscopeclient; do
     has_product "$product" || continue
     state=$(state_of "$product")
     source_state[$product]=$state
@@ -53,22 +53,11 @@ if [ -d /usr/lib/ccache ]; then
     export PATH="/usr/lib/ccache:$PATH"
 fi
 
-# libsigrok source of truth: link the bridge against the repo's own
-# sources/libsigrok (mounted read-only at /sources/libsigrok), unified with
-# PulseView/sigrok-cli, rather than a pinned upstream tarball. libsigrok-sys
-# copies it into OUT_DIR and patches the copy. The host passes LIBSIGROK_SRC_REV
-# (git-in-container can't read the submodule's gitdir) for the rebuild stamp.
-if [ -d "$SOURCE_DIR/libsigrok" ]; then
-    export LIBSIGROK_SRC_DIR="$SOURCE_DIR/libsigrok"
-fi
-
 echo "=== ngscope glibc Build (Debian 12) ==="
 echo "Toolchain: $(cc --version | head -n 1); libc: glibc; jobs: $JOBS; type: $BUILD_TYPE"
-command -v cargo >/dev/null && echo "Rust: $(cargo --version)"
 
 echo "[1/4] Synchronizing source code into persistent workspace..."
 projects=()
-has_product sigrok-bridge && projects+=(sigrok-bridge)
 has_product ngscopeclient && projects+=(ngscopeclient)
 for project in "${projects[@]}"; do
     # ngscopeclient is sourced from the scopehal-apps checkout but keeps its
@@ -81,12 +70,10 @@ cp "$SUPPORT_DIR/Makefile" "$BUILD_DIR/Makefile"
 cd "$BUILD_DIR"
 
 build_targets=()
-has_product sigrok-bridge && [ "${product_build[sigrok-bridge]}" -eq 1 ] && build_targets+=("install-sigrok-bridge")
 has_product ngscopeclient && [ "${product_build[ngscopeclient]}" -eq 1 ] && build_targets+=("install-ngscopeclient")
 if [ "${#build_targets[@]}" -gt 0 ]; then
     echo "[2/4] Building changed products: ${build_targets[*]}"
-    # Build sequentially: cargo and cmake+ninja each already saturate the cores,
-    # and the C-from-source libsigrok-sys step is heavy.
+    # cmake+ninja already saturates the cores.
     for goal in "${build_targets[@]}"; do
         make JOBS="$JOBS" BUILD_TYPE="$BUILD_TYPE" RELEASE_VERSION="$RELEASE_VERSION" \
             NGSCOPECLIENT_PKG_VERSION="${NGSCOPECLIENT_PKG_VERSION:-}" \
@@ -98,20 +85,12 @@ else
 fi
 
 # ---- packaging ------------------------------------------------------------
-SIGROK_BRIDGE_OUTPUT="$OUTPUT_DIR/sigrok-bridge-SLogic-linux-x86_64"
+# The top-level build script inserts the build version into the final filename.
 NGSCOPECLIENT_OUTPUT="$OUTPUT_DIR/ngscopeclient-SLogic-linux-x86_64.AppImage"
-sigrok_bridge_package=0
 ngscopeclient_package=0
-has_product sigrok-bridge && { [ "${product_build[sigrok-bridge]}" -eq 1 ] || [ ! -s "$SIGROK_BRIDGE_OUTPUT" ]; } && sigrok_bridge_package=1
 has_product ngscopeclient && { [ "${product_build[ngscopeclient]}" -eq 1 ] || [ ! -s "$NGSCOPECLIENT_OUTPUT" ]; } && ngscopeclient_package=1
 
 mkdir -p "$OUTPUT_DIR"
-
-if [ "$sigrok_bridge_package" -eq 1 ]; then
-    echo "[3/4] Packaging sigrok-bridge (single glibc binary)..."
-    rm -f "$SIGROK_BRIDGE_OUTPUT"
-    install -Dm755 sr/bin/sigrok-bridge "$SIGROK_BRIDGE_OUTPUT"
-fi
 
 create_ngscopeclient_appdir() {
     local appdir=$1
@@ -205,7 +184,6 @@ if [ "$ngscopeclient_package" -eq 1 ]; then
 fi
 
 artifacts=()
-has_product sigrok-bridge && artifacts+=("$SIGROK_BRIDGE_OUTPUT")
 has_product ngscopeclient && artifacts+=("$NGSCOPECLIENT_OUTPUT")
 file "${artifacts[@]}"
 ls -lh "${artifacts[@]}"

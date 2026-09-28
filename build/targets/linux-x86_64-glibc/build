@@ -7,7 +7,7 @@ SOURCES=""
 OUTPUT=""
 OUT="$BUILD_HOME/out/linux-x86_64-glibc/${BUILD_TYPE:-release}"
 CACHE="$BUILD_HOME/out/cache"
-PRODUCTS="sigrok-bridge,ngscopeclient"
+PRODUCTS="ngscopeclient"
 JOBS="${BUILD_JOBS:-$(nproc)}"
 ENGINE=""
 CLEAN=0
@@ -31,11 +31,12 @@ fi
 ENGINE=$("$BUILD_HOME/scripts/resolve-container-engine")
 IFS=, read -r -a product_list <<<"$PRODUCTS"
 for product in "${product_list[@]}"; do
-    case "$product" in sigrok-bridge|ngscopeclient) ;; *) echo "Unsupported glibc product: $product" >&2; exit 2 ;; esac
+    case "$product" in ngscopeclient) ;; *) echo "Unsupported glibc product: $product" >&2; exit 2 ;; esac
     src=$product; [ "$product" = ngscopeclient ] && src=scopehal-apps
     test -d "$SOURCES/$src" || { echo "Missing source: $src" >&2; exit 2; }
 done
-case ",$PRODUCTS," in *,sigrok-bridge,*) ;; *) rm -f "$OUTPUT/sigrok-bridge-SLogic-linux-x86_64" ;; esac
+# Clean any stale (unversioned) ngscopeclient artifact; the top-level build script
+# adds the version to the final name.
 case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLogic-linux-x86_64.AppImage" ;; esac
 
 # ngscopeclient builds directly from sources/scopehal-apps (Sipeed fork). Its
@@ -57,9 +58,6 @@ init_scopehal_apps_submodules() {
 case ",$PRODUCTS," in *,ngscopeclient,*) init_scopehal_apps_submodules ;; esac
 
 mkdir -p "$CACHE/ccache/linux-x86_64-glibc" \
-    "$CACHE/cargo/linux-x86_64-glibc/registry" \
-    "$CACHE/cargo/linux-x86_64-glibc/git" \
-    "$CACHE/libsigrok-sys" \
     "$CACHE/downloads" \
     "$OUTPUT" "$(dirname "$OUT")"
 # AppImage runtime for linuxdeploy's appimage plugin — pre-fetch and mount it so
@@ -95,36 +93,16 @@ fi
 # which pins its nested `lib` (scopehal fork); a moved or dirty lib shows in the
 # scopehal-apps working-tree status, so an edited driver reads as -dirty.
 source_env=()
-# libsigrok is a sibling submodule the bridge now links against (unified source).
-# Fold its rev into the bridge's rebuild trigger and hand it to libsigrok-sys for
-# the build stamp (in-container git can't read the submodule's gitdir).
-libsigrok_src_rev="unknown"
-if git -C "$SOURCES/libsigrok" rev-parse --git-dir >/dev/null 2>&1; then
-    libsigrok_src_rev=$(git -C "$SOURCES/libsigrok" rev-parse HEAD)
-    [ -z "$(git -C "$SOURCES/libsigrok" status --porcelain)" ] || libsigrok_src_rev="$libsigrok_src_rev-dirty"
+# scopehal-apps HEAD pins its nested lib (scopehal fork); a plain status reports a
+# moved/dirty lib so driver edits force a rebuild. In-container git can't read the
+# submodule gitdir, so compute the state on the host and pass it in.
+ng_state=""
+if git -C "$SOURCES/scopehal-apps" rev-parse --git-dir >/dev/null 2>&1; then
+    ng_head=$(git -C "$SOURCES/scopehal-apps" rev-parse HEAD)
+    ng_state="$ng_head"
+    [ -z "$(git -C "$SOURCES/scopehal-apps" status --porcelain)" ] || ng_state="$ng_state-dirty"
 fi
-
-for project in sigrok-bridge ngscopeclient; do
-    variable="SOURCE_${project^^}_STATE"
-    variable=${variable//-/_}
-    src=$project
-    [ "$project" = ngscopeclient ] && src=scopehal-apps
-    state=""
-    if git -C "$SOURCES/$src" rev-parse --git-dir >/dev/null 2>&1; then
-        head=$(git -C "$SOURCES/$src" rev-parse HEAD)
-        if [ "$project" = ngscopeclient ]; then
-            # scopehal-apps HEAD pins its nested lib (scopehal fork); plain status
-            # reports a moved/dirty lib so driver edits force a rebuild.
-            state="$head"
-            [ -z "$(git -C "$SOURCES/$src" status --porcelain)" ] || state="$state-dirty"
-        else
-            state="${head}+libsigrok-${libsigrok_src_rev}"
-            [ -z "$(git -C "$SOURCES/$src" status --porcelain)" ] || state="$state-dirty"
-        fi
-    fi
-    source_env+=( -e "$variable=$state" )
-done
-source_env+=( -e "LIBSIGROK_SRC_REV=$libsigrok_src_rev" )
+source_env+=( -e "SOURCE_NGSCOPECLIENT_STATE=$ng_state" )
 
 # scopehal-apps versions itself from `git describe`, but sources are synced into
 # the container without .git; compute the version on the host and pass it in so
@@ -153,7 +131,6 @@ fi
     -e RELEASE_VERSION="${RELEASE_VERSION:-0.0.0-dev}" \
     -e PRODUCTS="$PRODUCTS" \
     -e SLOGIC_BUILD_LOGIC_KEY="${SLOGIC_BUILD_LOGIC_KEY:-unknown}" \
-    -e LIBSIGROK_SYS_CACHE_DIR=/cache/libsigrok-sys \
     -e APPIMAGE_EXTRACT_AND_RUN=1 \
     "${source_env[@]}" \
     -v "$SOURCES:/sources:ro" \
@@ -161,9 +138,6 @@ fi
     -v "$TARGET_DIR:/target:ro" \
     -v "$OUT:/workspace" \
     -v "$CACHE/ccache/linux-x86_64-glibc:/cache/ccache" \
-    -v "$CACHE/cargo/linux-x86_64-glibc/registry:/opt/rust/cargo/registry" \
-    -v "$CACHE/cargo/linux-x86_64-glibc/git:/opt/rust/cargo/git" \
-    -v "$CACHE/libsigrok-sys:/cache/libsigrok-sys" \
     -v "$RUNTIME:/usr/local/share/runtime-x86_64:ro" \
     -v "$OUTPUT:/output" \
     "$IMAGE" bash /target/build-in-container

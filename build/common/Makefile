@@ -17,8 +17,6 @@ RSYNC_REFRESH = rsync -a --exclude='.git' --exclude='build'
 # Cargo projects legitimately ship a build/ module dir (e.g. libsigrok-sys/build/
 # holds the build-script sources), so do NOT exclude 'build'. Exclude cargo's
 # root-anchored target/ output instead.
-RSYNC_CARGO = rsync -a --delete --exclude='.git' --exclude='/target'
-RSYNC_CARGO_REFRESH = rsync -a --exclude='.git' --exclude='/target'
 
 # 交叉编译开关：CROSS=win32 使用 x86_64-w64-mingw32 工具链
 # 用法: make CROSS=win32 install-libsigrok
@@ -72,7 +70,6 @@ PULSEVIEW_DIR = $(BUILD_DIR)/pulseview
 SLOGICVIEW_DIR = $(BUILD_DIR)/slogicview
 SIGROK_CLI_DIR = $(BUILD_DIR)/sigrok-cli
 ALL_LOGIC_DIR = $(BUILD_DIR)/all-logic
-SIGROK_BRIDGE_DIR = $(BUILD_DIR)/sigrok-bridge
 NGSCOPECLIENT_DIR = $(BUILD_DIR)/ngscopeclient
 
 LIBSIGROK_BUILD_SYSTEM = autotools
@@ -104,9 +101,6 @@ NGSCOPECLIENT_CONFIGURE_OPTS = -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DDISABLE_PCH=ON
 ifneq ($(strip $(NGSCOPECLIENT_PKG_VERSION)),)
 NGSCOPECLIENT_CONFIGURE_OPTS += -DNGSCOPECLIENT_PACKAGE_VERSION=$(NGSCOPECLIENT_PKG_VERSION) -DNGSCOPECLIENT_PACKAGE_VERSION_LONG=$(NGSCOPECLIENT_PKG_VERSION_LONG)
 endif
-# sigrok-bridge (Rust): libsigrok-sys builds its own static libsigrok + C deps.
-CARGO ?= cargo
-CARGO_BUILD_FLAGS ?= --release
 
 # 通用的构建模板
 define CONFIGURE_TEMPLATE
@@ -192,12 +186,6 @@ $(ALL_LOGIC_DIR): all-logic/CMakeLists.txt
 	@echo "[all-logic] Syncing source code..."
 	@mkdir -p $(BUILD_DIR)
 	@$(RSYNC) all-logic/ $(ALL_LOGIC_DIR)/
-
-# sigrok-bridge source synchronization
-$(SIGROK_BRIDGE_DIR): sigrok-bridge/Cargo.toml
-	@echo "[sigrok-bridge] Syncing source code..."
-	@mkdir -p $(BUILD_DIR)
-	@$(RSYNC_CARGO) sigrok-bridge/ $(SIGROK_BRIDGE_DIR)/
 
 # ngscopeclient source synchronization
 $(NGSCOPECLIENT_DIR): ngscopeclient/CMakeLists.txt
@@ -352,25 +340,6 @@ clean-all-logic:
 	$(call CLEAN_TEMPLATE,all-logic,$(ALL_LOGIC_BUILD_SYSTEM),$(ALL_LOGIC_DIR))
 
 # ==============================================
-# sigrok-bridge 目标 (Rust; libsigrok-sys 自带静态 libsigrok，不依赖共享前缀)
-# ==============================================
-configure-sigrok-bridge: $(SIGROK_BRIDGE_DIR)
-
-build-sigrok-bridge: $(SIGROK_BRIDGE_DIR) $(TOOLCHAIN_STAMP)
-	@$(RSYNC_CARGO_REFRESH) sigrok-bridge/ $(SIGROK_BRIDGE_DIR)/
-	@echo "[sigrok-bridge] cargo build $(CARGO_BUILD_FLAGS) -p sigrok-bridge"
-	cd $(SIGROK_BRIDGE_DIR) && $(CARGO) build $(CARGO_BUILD_FLAGS) -p sigrok-bridge
-
-install-sigrok-bridge: build-sigrok-bridge
-	@echo "[sigrok-bridge] Installing to $(PREFIX)..."
-	@mkdir -p $(PREFIX)/bin
-	cp $(SIGROK_BRIDGE_DIR)/target/release/sigrok-bridge$(EXE_SUFFIX) $(PREFIX)/bin/
-
-clean-sigrok-bridge:
-	@echo "[sigrok-bridge] Cleaning..."
-	-cd $(SIGROK_BRIDGE_DIR) && $(CARGO) clean 2>/dev/null || true
-
-# ==============================================
 # ngscopeclient 目标 (scopehal-apps; Vulkan GUI，自带 lib fork，不依赖共享前缀)
 # ==============================================
 configure-ngscopeclient: $(NGSCOPECLIENT_DIR)/build/CMakeCache.txt
@@ -493,5 +462,4 @@ help:
 	configure-pulseview build-pulseview install-pulseview update-pulseview clean-pulseview \
 	configure-slogicview build-slogicview install-slogicview update-slogicview clean-slogicview \
 	configure-sigrok-cli build-sigrok-cli install-sigrok-cli update-sigrok-cli clean-sigrok-cli \
-	configure-sigrok-bridge build-sigrok-bridge install-sigrok-bridge clean-sigrok-bridge \
 	configure-ngscopeclient build-ngscopeclient install-ngscopeclient clean-ngscopeclient

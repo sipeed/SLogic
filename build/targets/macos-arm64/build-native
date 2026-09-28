@@ -691,63 +691,6 @@ done
 fi   # end legacy_requested
 
 # ==========================================================================
-# sigrok-bridge (Rust): a self-contained static binary. Sign both Mach-Os with
-# the hardened runtime and ship as a notarized zip, mirroring the sigrok-cli
-# portable-zip path.
-# ==========================================================================
-if has_product sigrok-bridge; then
-    echo "=== Building sigrok-bridge (macOS) ==="
-    # Exclude the cargo output (/target), NOT "build": libsigrok-sys/build/ holds
-    # the crate's build scripts (common.rs/deps.rs) that the build must read.
-    rsync -a --delete --exclude=.git --exclude=/target \
-        "$SOURCES/sigrok-bridge/" "$BUILD_ROOT/sigrok-bridge/"
-    cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
-    # Link the bridge against the repo's own sources/libsigrok (unified source),
-    # not a pinned upstream tarball. Only sigrok-bridge is rsynced here, so point
-    # libsigrok-sys at the original checkout and pass its rev for the build stamp.
-    libsigrok_src_rev="unknown"
-    if git -C "$SOURCES/libsigrok" rev-parse --git-dir >/dev/null 2>&1; then
-        libsigrok_src_rev=$(git -C "$SOURCES/libsigrok" rev-parse HEAD)
-        [ -z "$(git -C "$SOURCES/libsigrok" status --porcelain)" ] || libsigrok_src_rev="$libsigrok_src_rev-dirty"
-    fi
-    # Isolate the bridge/glib build from the conda prefix. build-native exports
-    # CPPFLAGS=-I$PREFIX/include (and -L$PREFIX/lib) for the Qt/sigrok deps, but
-    # libsigrok-sys bootstraps its OWN glib/libffi/pcre2/... into OUT_DIR. If the
-    # conda include leaks in, glib compiles against conda's GNU iconv.h/libintl.h
-    # (which macro-rename to libiconv_*/libintl_* prefixed symbols) and then fails
-    # to link against macOS's BSD iconv / absent gettext. Drop the conda -I/-L so
-    # glib uses the macOS SDK's plain iconv and no external gettext (self-contained).
-    ( cd "$BUILD_ROOT" && \
-        CFLAGS="-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET" \
-        CXXFLAGS="-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET" \
-        CPPFLAGS="" \
-        LDFLAGS="-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET -Wl,-headerpad_max_install_names" \
-        PKG_CONFIG_PATH="" CMAKE_PREFIX_PATH="" \
-        LIBSIGROK_SRC_DIR="$SOURCES/libsigrok" LIBSIGROK_SRC_REV="$libsigrok_src_rev" \
-        make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
-        RELEASE_VERSION="$RELEASE_VERSION" install-sigrok-bridge )
-
-    BR_STAGE="$BUILD_ROOT/sigrok-bridge-SLogic-macos-arm64"
-    rm -rf "$BR_STAGE"; mkdir -p "$BR_STAGE"
-    cp "$BUILD_ROOT/sr-darwin/bin/sigrok-bridge" "$BR_STAGE/"
-    for b in "$BR_STAGE/sigrok-bridge"; do
-        if [ "$SIGN_IDENTITY" = - ]; then
-            codesign --force --sign - "$b"
-        else
-            codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$b"
-        fi
-    done
-    rm -f "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip"
-    ditto -c -k --keepParent "$BR_STAGE" "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip"
-    if [ -n "${MACOS_NOTARY_PROFILE:-}" ] && [ "$SIGN_IDENTITY" != - ]; then
-        xcrun notarytool submit "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip" \
-            --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
-    fi
-    git -C "$SOURCES/sigrok-bridge" rev-parse HEAD > "$STAMP_DIR/sigrok-bridge"
-    ls -lh "$OUTPUT/sigrok-bridge-SLogic-macos-arm64.zip"
-fi
-
-# ==========================================================================
 # ngscopeclient (Vulkan/GLFW GUI): hand-assembled .app following this repo's
 # bundling convention (dylibbundler + close_bundle_dependencies + our own
 # signing/notarization), NOT upstream's cpack Bundle / brew-molten-vk /

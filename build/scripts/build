@@ -162,6 +162,26 @@ def target_logic_key(target: dict, environment: dict) -> str:
     return digest.hexdigest()
 
 
+def version_artifacts(output: Path, version: str) -> None:
+    """Embed the build version in the final artifact filenames.
+
+    Target build scripts emit unversioned names (<App>-SLogic-<platform>.<ext>);
+    here, after the build and before the build-info is recorded, we insert the
+    version once centrally: <App>-SLogic-<version>-<platform>.<ext>. This keeps
+    downloads from different builds distinguishable and collision-free (only the
+    distributable artifacts carry "-SLogic-"; bookkeeping files are untouched).
+    """
+    marker = "-SLogic-"
+    versioned = f"-SLogic-{version}-"
+    for path in sorted(output.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if marker not in name or versioned in name:
+            continue
+        path.rename(output / name.replace(marker, versioned, 1))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="./build/scripts/build",
@@ -358,6 +378,7 @@ def main() -> int:
 
     for target_name in selected_targets:
         output = artifact_root / target_name
+        version_artifacts(output, release_version)
         subprocess.run([
             sys.executable,
             str(BUILD_HOME / "scripts/write-build-info.py"),

@@ -22,10 +22,6 @@
 	path = sources/all-logic
 	url = https://github.com/sipeed/ALL-LOGIC.git
 	branch = main
-[submodule "sources/sigrok-bridge"]
-	path = sources/sigrok-bridge
-	url = https://github.com/sipeed/sigrok-bridge-server.git
-	branch = main
 [submodule "sources/scopehal-apps"]
 	path = sources/scopehal-apps
 	url = https://github.com/sipeed/scopehal-apps.git

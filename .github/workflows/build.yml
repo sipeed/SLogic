@@ -17,7 +17,7 @@ on:
         description: Comma-separated products (legacy sigrok/Qt targets)
         default: pulseview,slogicview,sigrok-cli,all-logic
       ngscope:
-        description: Also build ngscopeclient + sigrok-bridge (slow; Vulkan/Rust)
+        description: Also build ngscopeclient (slow; Vulkan C++)
         type: boolean
         default: false
       macos_only:
@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       ngscope_only:
-        description: macOS only — build just ngscopeclient + sigrok-bridge (skip the Qt GUIs)
+        description: macOS only — build just ngscopeclient (skip the Qt GUIs)
         type: boolean
         default: false
   push:
@@ -37,8 +37,8 @@ permissions:
 
 env:
   PRODUCTS: ${{ github.event.inputs.products || 'pulseview,slogicview,sigrok-cli,all-logic' }}
-  # ngscopeclient + sigrok-bridge are slow (Vulkan C++, Rust building libsigrok
-  # from source): opt in via the dispatch flag, and always on a release tag.
+  # ngscopeclient is slow (Vulkan C++): opt in via the dispatch flag, and always
+  # on a release tag.
   NGSCOPE: ${{ github.event_name == 'push' || github.event.inputs.ngscope == 'true' }}
 
 jobs:
@@ -102,9 +102,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ngscopeclient (Vulkan GUI) + sigrok-bridge (Rust) on a glibc Debian
-  # container — they are glibc-validated and do not build on the musl target.
-  # Opt-in (NGSCOPE) because the Vulkan C++ and from-source Rust builds are slow.
+  # ngscopeclient (Vulkan GUI) on a glibc Debian container — it is glibc-validated
+  # and does not build on the musl target. Opt-in (NGSCOPE) because the Vulkan C++
+  # build is slow.
   glibc-target:
     name: linux-x86_64-glibc
     if: ${{ (github.event_name == 'push' || github.event.inputs.ngscope == 'true') && github.event.inputs.macos_only != 'true' && github.event.inputs.ngscope_only != 'true' }}
@@ -133,16 +133,13 @@ jobs:
             docker save "$IMG" -o "$TAR"
           fi
 
-      # cargo registry/git + libsigrok-sys tarballs + ccache persist between runs
-      # (the from-source C build for libsigrok-sys is heavy).
+      # ccache persists between runs (the Vulkan C++ build is heavy).
       - name: Cache build caches
         uses: actions/cache@v4
         with:
           path: |
-            build/out/cache/cargo
-            build/out/cache/libsigrok-sys
             build/out/cache/ccache/linux-x86_64-glibc
-          key: glibc-caches-${{ hashFiles('sources/sigrok-bridge/Cargo.lock', 'build/environments/linux-glibc/**') }}
+          key: glibc-caches-${{ hashFiles('build/environments/linux-glibc/**') }}
           restore-keys: |
             glibc-caches-
 
@@ -150,7 +147,7 @@ jobs:
         run: |
           python3 build/scripts/build \
             --target linux-x86_64-glibc \
-            --product sigrok-bridge,ngscopeclient
+            --product ngscopeclient
 
       - uses: actions/upload-artifact@v4
         with:
@@ -171,9 +168,7 @@ jobs:
       # build-native bundles dylibs with dylibbundler (macdeployqt handles Qt).
       # molten-vk supplies the runtime Vulkan ICD bundled into the ngscopeclient
       # .app (only needed when NGSCOPE is on, but harmless otherwise).
-      # rust -> cargo for sigrok-bridge's libsigrok-sys: build-native resets PATH to
-      # $PREFIX/bin:/opt/homebrew/bin:... which drops rustup's ~/.cargo/bin, so brew's
-      # cargo (in /opt/homebrew/bin, on that PATH) is what it finds. meson is NOT from
+      # meson is NOT from
       # brew here: brew meson runs under its own venv python that lacks the `packaging`
       # module glib2's meson build requires. It is installed into the conda prefix
       # instead (next step) so it runs under the prefix python, which has packaging.
@@ -184,7 +179,7 @@ jobs:
       # passes the bundle's 15.0 deployment-target check.
       - name: Install packaging + toolchain
         run: |
-          brew install dylibbundler molten-vk rust \
+          brew install dylibbundler molten-vk \
             glfw glslang shaderc spirv-tools vulkan-headers vulkan-loader \
             yaml-cpp libomp catch2 hidapi
 
@@ -267,11 +262,11 @@ jobs:
           MACOS_NOTARY_PROFILE: slogic-notary
         run: |
           if [ "${{ github.event.inputs.ngscope_only }}" = true ]; then
-            products="sigrok-bridge,ngscopeclient"
+            products="ngscopeclient"
           else
             products="$PRODUCTS"
             if [ "$NGSCOPE" = true ]; then
-              products="$products,sigrok-bridge,ngscopeclient"
+              products="$products,ngscopeclient"
             fi
           fi
           python3 build/scripts/build --target macos-arm64 --product "$products"

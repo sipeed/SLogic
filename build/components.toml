@@ -40,15 +40,6 @@ source = "all-logic"
 dependencies = []
 targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
 
-# Rust bridge server (twinlan protocol). Self-contained: its libsigrok-sys
-# crate builds its own static libsigrok + C deps, so dependencies = []. Only
-# the glibc Linux target and macOS (Vulkan/glibc-validated; Windows deferred).
-[sigrok-bridge]
-kind = "product"
-source = "sigrok-bridge"
-dependencies = []
-targets = ["linux-x86_64-glibc", "macos-arm64"]
-
 # ngscopeclient (scopehal-apps GUI). Built directly from the sources/scopehal-apps
 # submodule (Sipeed fork): its nested `lib` submodule IS the scopehal fork carrying
 # the SLogic driver, so each target driver inits scopehal-apps's own submodules
