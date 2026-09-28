@@ -29,6 +29,7 @@ CORE_FILES = ["slogic.h", "slogic.c", "slogic8u2.c", "slogic16u3.c", "slogic32u3
 DEST_DIRS = [
     "sources/libsigrok/src/hardware/sipeed-slogic-analyzer/slogic",
     "sources/all-logic/libsigrok4DSL/hardware/sipeed-slogic/slogic",
+    "sources/scopehal-apps/lib/scopehal/slogic",
 ]
 
 ROOT = Path(__file__).resolve().parents[2]

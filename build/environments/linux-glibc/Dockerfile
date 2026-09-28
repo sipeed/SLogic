@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         lsb-release \
         libvulkan-dev \
         vulkan-tools \
+        libusb-1.0-0-dev \
         libglfw3-dev \
         libyaml-cpp-dev \
         libsigc++-3.0-dev \
