@@ -209,10 +209,10 @@ make_appimage() {
     rm "$output.squashfs"
 }
 
-PULSEVIEW_OUTPUT="$OUTPUT_DIR/PulseView-SLogic-linux-x86_64-musl.AppImage"
-SLOGICVIEW_OUTPUT="$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64-musl.AppImage"
-SIGROK_CLI_OUTPUT="$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64-musl.AppImage"
-ALL_LOGIC_OUTPUT="$OUTPUT_DIR/AllLogic-linux-x86_64-musl.AppImage"
+PULSEVIEW_OUTPUT="$OUTPUT_DIR/PulseView-SLogic-linux-x86_64.AppImage"
+SLOGICVIEW_OUTPUT="$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64.AppImage"
+SIGROK_CLI_OUTPUT="$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64.AppImage"
+ALL_LOGIC_OUTPUT="$OUTPUT_DIR/AllLogic-SLogic-linux-x86_64.AppImage"
 pulseview_package=0
 slogicview_package=0
 sigrok_cli_package=0
@@ -301,10 +301,10 @@ if [ "$all_logic_package" -eq 1 ]; then
     make_appimage "$AL_APPDIR" "$ALL_LOGIC_OUTPUT"
 fi
 artifacts=()
-has_product pulseview && artifacts+=("$OUTPUT_DIR/PulseView-SLogic-linux-x86_64-musl.AppImage")
-has_product slogicview && artifacts+=("$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64-musl.AppImage")
-has_product sigrok-cli && artifacts+=("$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64-musl.AppImage")
-has_product all-logic && artifacts+=("$OUTPUT_DIR/AllLogic-linux-x86_64-musl.AppImage")
+has_product pulseview && artifacts+=("$OUTPUT_DIR/PulseView-SLogic-linux-x86_64.AppImage")
+has_product slogicview && artifacts+=("$OUTPUT_DIR/SLogicView-SLogic-linux-x86_64.AppImage")
+has_product sigrok-cli && artifacts+=("$OUTPUT_DIR/sigrok-cli-SLogic-linux-x86_64.AppImage")
+has_product all-logic && artifacts+=("$OUTPUT_DIR/AllLogic-SLogic-linux-x86_64.AppImage")
 file "${artifacts[@]}"
 ls -lh "${artifacts[@]}"
 

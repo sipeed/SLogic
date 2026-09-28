@@ -106,11 +106,11 @@ for target in linux-x86_64-musl windows-x86_64-ucrt macos-arm64; do
     case "$target" in
         linux-x86_64-musl)
             platform=linux-x86_64
-            expected="PulseView-SLogic-linux-x86_64-musl.AppImage SLogicView-SLogic-linux-x86_64-musl.AppImage sigrok-cli-SLogic-linux-x86_64-musl.AppImage"
+            expected="PulseView-SLogic-linux-x86_64.AppImage SLogicView-SLogic-linux-x86_64.AppImage sigrok-cli-SLogic-linux-x86_64.AppImage"
             ;;
         windows-x86_64-ucrt)
             platform=windows-x86_64
-            expected="PulseView-SLogic-windows-x86_64-ucrt.exe SLogicView-SLogic-windows-x86_64-ucrt.exe sigrok-cli-SLogic-windows-x86_64-ucrt.exe"
+            expected="PulseView-SLogic-windows-x86_64.exe SLogicView-SLogic-windows-x86_64.exe sigrok-cli-SLogic-windows-x86_64.exe"
             ;;
         macos-arm64)
             platform=macos-arm64

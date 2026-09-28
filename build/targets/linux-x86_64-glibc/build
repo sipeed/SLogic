@@ -32,39 +32,29 @@ ENGINE=$("$BUILD_HOME/scripts/resolve-container-engine")
 IFS=, read -r -a product_list <<<"$PRODUCTS"
 for product in "${product_list[@]}"; do
     case "$product" in sigrok-bridge|ngscopeclient) ;; *) echo "Unsupported glibc product: $product" >&2; exit 2 ;; esac
-    test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
+    src=$product; [ "$product" = ngscopeclient ] && src=scopehal-apps
+    test -d "$SOURCES/$src" || { echo "Missing source: $src" >&2; exit 2; }
 done
-case ",$PRODUCTS," in *,sigrok-bridge,*) ;; *) rm -f "$OUTPUT/sigrok-bridge-SLogic-linux-x86_64-glibc" ;; esac
-case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLogic-linux-x86_64-glibc.AppImage" ;; esac
+case ",$PRODUCTS," in *,sigrok-bridge,*) ;; *) rm -f "$OUTPUT/sigrok-bridge-SLogic-linux-x86_64" ;; esac
+case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLogic-linux-x86_64.AppImage" ;; esac
 
-# The ngscopeclient wrapper is pure-upstream scopehal-apps; its `lib` submodule
-# (the scopehal fork carrying the SLogic driver) is overridden on the host here,
-# before the container run and before SOURCE state is captured. This never edits
-# the wrapper's tracked .gitmodules (only the nested checkout), so the release
-# clean-check (which ignores submodule state for override components) still holds.
-override_ngscopeclient_lib() {
-    local wrapper="$SOURCES/ngscopeclient"
-    local scopehal="$SOURCES/scopehal"
-    # shellcheck disable=SC1091
-    . "$BUILD_HOME/common/ngscopeclient-lib.env"
-    local lib="$wrapper/$LIB_SUBMODULE"
-    test -d "$scopehal/.git" -o -f "$scopehal/.git" || {
-        echo "sources/scopehal not checked out — run: git submodule update --init --recursive sources/scopehal" >&2
+# ngscopeclient builds directly from sources/scopehal-apps (Sipeed fork). Its
+# nested `lib` submodule IS the scopehal fork carrying the SLogic driver, and
+# `src/imgui`, `src/imgui-node-editor`, ... are its own submodules. Init them on
+# the host (submodule gitdirs live in the superproject, invisible in-container)
+# before the container run and before SOURCE state is captured.
+init_scopehal_apps_submodules() {
+    local apps="$SOURCES/scopehal-apps"
+    test -d "$apps/.git" -o -f "$apps/.git" || {
+        echo "sources/scopehal-apps not checked out — run: git submodule update --init --recursive sources/scopehal-apps" >&2
         exit 1
     }
-    # Ensure the scopehal fork + its nested submodules (xptools/log/VkFFT/
-    # canvas_ity) are populated; idempotent on re-runs.
-    git -C "$scopehal" submodule update --init --recursive
-    # Init the wrapper's OTHER submodules (imgui, nativefiledialog, ...) but skip
-    # its `lib` gitlink — we overlay lib from sources/scopehal instead of pulling
-    # upstream scopehal, so no build-time network fetch of the fork.
-    git -C "$wrapper" -c submodule."$LIB_SUBMODULE".update=none submodule update --init --recursive
-    # Overlay the SLogic scopehal fork onto the wrapper's lib. --exclude=.git
-    # copies the nested submodules' content as plain trees.
-    mkdir -p "$lib"
-    rsync -a --delete --exclude='.git' "$scopehal/" "$lib/"
+    # --recursive pulls lib (scopehal + its nested xptools/log/VkFFT/canvas_ity),
+    # src/imgui, src/imgui-node-editor, src/ImGuiFileDialog,
+    # src/nativefiledialog-extended and src/imgui_markdown; idempotent on re-runs.
+    git -C "$apps" submodule update --init --recursive
 }
-case ",$PRODUCTS," in *,ngscopeclient,*) override_ngscopeclient_lib ;; esac
+case ",$PRODUCTS," in *,ngscopeclient,*) init_scopehal_apps_submodules ;; esac
 
 mkdir -p "$CACHE/ccache/linux-x86_64-glibc" \
     "$CACHE/cargo/linux-x86_64-glibc/registry" \
@@ -100,15 +90,11 @@ if [ -n "$ENGINE_CPUS" ] && [ "$ENGINE_CPUS" -gt 0 ] && [ "$CPUS" -gt "$ENGINE_C
 fi
 
 # Source git state is resolved on the host: submodule gitdirs live in the
-# superproject and are not visible inside the container. sigrok-bridge uses the
-# usual "<commit>[-dirty]"; ngscopeclient uses a deterministic pinned identity
-# "<wrapper_head>+lib-<override_commit>" so the expected lib override never reads
-# as -dirty and the stamp changes iff the wrapper OR the pinned lib commit does.
+# superproject and are not visible inside the container. Both products use the
+# usual "<commit>[-dirty]". For ngscopeclient the commit is scopehal-apps's HEAD,
+# which pins its nested `lib` (scopehal fork); a moved or dirty lib shows in the
+# scopehal-apps working-tree status, so an edited driver reads as -dirty.
 source_env=()
-if [ -f "$BUILD_HOME/common/ngscopeclient-lib.env" ]; then
-    # shellcheck disable=SC1091
-    . "$BUILD_HOME/common/ngscopeclient-lib.env"
-fi
 # libsigrok is a sibling submodule the bridge now links against (unified source).
 # Fold its rev into the bridge's rebuild trigger and hand it to libsigrok-sys for
 # the build stamp (in-container git can't read the submodule's gitdir).
@@ -118,26 +104,22 @@ if git -C "$SOURCES/libsigrok" rev-parse --git-dir >/dev/null 2>&1; then
     [ -z "$(git -C "$SOURCES/libsigrok" status --porcelain)" ] || libsigrok_src_rev="$libsigrok_src_rev-dirty"
 fi
 
-# scopehal is a sibling submodule overlaid into ngscopeclient/lib (unified source).
-# Fold its rev into ngscopeclient's rebuild trigger so editing scopehal rebuilds.
-scopehal_src_rev="unknown"
-if git -C "$SOURCES/scopehal" rev-parse --git-dir >/dev/null 2>&1; then
-    scopehal_src_rev=$(git -C "$SOURCES/scopehal" rev-parse HEAD)
-    [ -z "$(git -C "$SOURCES/scopehal" status --porcelain)" ] || scopehal_src_rev="$scopehal_src_rev-dirty"
-fi
-
 for project in sigrok-bridge ngscopeclient; do
     variable="SOURCE_${project^^}_STATE"
     variable=${variable//-/_}
+    src=$project
+    [ "$project" = ngscopeclient ] && src=scopehal-apps
     state=""
-    if git -C "$SOURCES/$project" rev-parse --git-dir >/dev/null 2>&1; then
-        head=$(git -C "$SOURCES/$project" rev-parse HEAD)
+    if git -C "$SOURCES/$src" rev-parse --git-dir >/dev/null 2>&1; then
+        head=$(git -C "$SOURCES/$src" rev-parse HEAD)
         if [ "$project" = ngscopeclient ]; then
-            state="${head}+scopehal-${scopehal_src_rev}"
-            [ -z "$(git -C "$SOURCES/$project" status --porcelain --ignore-submodules=all)" ] || state="$state-dirty"
+            # scopehal-apps HEAD pins its nested lib (scopehal fork); plain status
+            # reports a moved/dirty lib so driver edits force a rebuild.
+            state="$head"
+            [ -z "$(git -C "$SOURCES/$src" status --porcelain)" ] || state="$state-dirty"
         else
             state="${head}+libsigrok-${libsigrok_src_rev}"
-            [ -z "$(git -C "$SOURCES/$project" status --porcelain)" ] || state="$state-dirty"
+            [ -z "$(git -C "$SOURCES/$src" status --porcelain)" ] || state="$state-dirty"
         fi
     fi
     source_env+=( -e "$variable=$state" )
@@ -146,10 +128,22 @@ source_env+=( -e "LIBSIGROK_SRC_REV=$libsigrok_src_rev" )
 
 # scopehal-apps versions itself from `git describe`, but sources are synced into
 # the container without .git; compute the version on the host and pass it in so
-# CMake skips git (see build/common/Makefile ngscopeclient block).
-if git -C "$SOURCES/ngscopeclient" rev-parse --git-dir >/dev/null 2>&1; then
-    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION=$(git -C "$SOURCES/ngscopeclient" describe --always --tags 2>/dev/null)" )
-    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION_LONG=$(git -C "$SOURCES/ngscopeclient" describe --always --tags --long 2>/dev/null)" )
+# CMake skips git (see build/common/Makefile ngscopeclient block). The sipeed fork
+# carries no version tag, so `git describe --tags` falls back to a bare SHA which
+# scopehal-apps's CMake VERSIONINFO parser rejects — synthesize a valid
+# vMAJOR.MINOR.PATCH-N-gSHA when there is no v-tag.
+if git -C "$SOURCES/scopehal-apps" rev-parse --git-dir >/dev/null 2>&1; then
+    ng_ver=$(git -C "$SOURCES/scopehal-apps" describe --always --tags 2>/dev/null)
+    ng_ver_long=$(git -C "$SOURCES/scopehal-apps" describe --always --tags --long 2>/dev/null)
+    case "$ng_ver" in
+        v[0-9]*) ;;
+        *)  ng_count=$(git -C "$SOURCES/scopehal-apps" rev-list --count HEAD 2>/dev/null || echo 0)
+            ng_sha=$(git -C "$SOURCES/scopehal-apps" rev-parse --short HEAD 2>/dev/null || echo 0000000)
+            ng_ver="v0.0.0-$ng_count-g$ng_sha"
+            ng_ver_long="$ng_ver" ;;
+    esac
+    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION=$ng_ver" )
+    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION_LONG=$ng_ver_long" )
 fi
 
 "$ENGINE" run --rm \

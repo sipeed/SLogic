@@ -71,7 +71,11 @@ projects=()
 has_product sigrok-bridge && projects+=(sigrok-bridge)
 has_product ngscopeclient && projects+=(ngscopeclient)
 for project in "${projects[@]}"; do
-    rsync -a --delete --exclude='.git' "$SOURCE_DIR/$project/" "$BUILD_DIR/$project/"
+    # ngscopeclient is sourced from the scopehal-apps checkout but keeps its
+    # in-tree build directory name (the Makefile target is still ngscopeclient).
+    src=$project
+    [ "$project" = ngscopeclient ] && src=scopehal-apps
+    rsync -a --delete --exclude='.git' "$SOURCE_DIR/$src/" "$BUILD_DIR/$project/"
 done
 cp "$SUPPORT_DIR/Makefile" "$BUILD_DIR/Makefile"
 cd "$BUILD_DIR"
@@ -94,8 +98,8 @@ else
 fi
 
 # ---- packaging ------------------------------------------------------------
-SIGROK_BRIDGE_OUTPUT="$OUTPUT_DIR/sigrok-bridge-SLogic-linux-x86_64-glibc"
-NGSCOPECLIENT_OUTPUT="$OUTPUT_DIR/ngscopeclient-SLogic-linux-x86_64-glibc.AppImage"
+SIGROK_BRIDGE_OUTPUT="$OUTPUT_DIR/sigrok-bridge-SLogic-linux-x86_64"
+NGSCOPECLIENT_OUTPUT="$OUTPUT_DIR/ngscopeclient-SLogic-linux-x86_64.AppImage"
 sigrok_bridge_package=0
 ngscopeclient_package=0
 has_product sigrok-bridge && { [ "${product_build[sigrok-bridge]}" -eq 1 ] || [ ! -s "$SIGROK_BRIDGE_OUTPUT" ]; } && sigrok_bridge_package=1

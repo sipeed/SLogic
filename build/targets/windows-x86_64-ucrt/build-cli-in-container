@@ -79,7 +79,7 @@ cd "$BUILD_DIR"
 mkdir -p /c/output
 ARCHIVE="$BUILD_DIR/sigrok-cli-portable.7z"
 PAYLOAD="$BUILD_DIR/sigrok-cli-payload.exe"
-OUTPUT=/c/output/sigrok-cli-SLogic-windows-x86_64-ucrt.exe
+OUTPUT=/c/output/sigrok-cli-SLogic-windows-x86_64.exe
 rm -f "$ARCHIVE" "$PAYLOAD" "$OUTPUT"
 (
     cd "$PORTABLE"

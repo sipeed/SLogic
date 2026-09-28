@@ -672,8 +672,8 @@ EOF
     verify_deployment_target "$AL_CONTENTS"
 
     package_gui_dmg "$AL_APP" AllLogic AllLogic "ALL LOGIC" \
-        AllLogic-macos-arm64.dmg
-    ls -lh "$OUTPUT/AllLogic-macos-arm64.dmg"
+        AllLogic-SLogic-macos-arm64.dmg
+    ls -lh "$OUTPUT/AllLogic-SLogic-macos-arm64.dmg"
 fi
 
 file "$CONTENTS/MacOS/pulseview-bin" "$SV_CONTENTS/MacOS/slogicview-bin" \
@@ -761,31 +761,31 @@ fi
 # ==========================================================================
 if has_product ngscopeclient; then
     echo "=== Building ngscopeclient (macOS) ==="
-    # D3: overlay the scopehal fork (sources/scopehal submodule) onto the
-    # wrapper's lib on the host before rsync — no build-time network fetch.
-    (
-        # shellcheck disable=SC1091
-        . "$BUILD_HOME/common/ngscopeclient-lib.env"
-        wrapper="$SOURCES/ngscopeclient"
-        scopehal="$SOURCES/scopehal"
-        lib="$wrapper/$LIB_SUBMODULE"
-        test -d "$scopehal/.git" -o -f "$scopehal/.git" || {
-            echo "sources/scopehal not checked out — run: git submodule update --init --recursive sources/scopehal" >&2
-            exit 1
-        }
-        git -C "$scopehal" submodule update --init --recursive
-        # Init the wrapper's OTHER submodules but skip its `lib` gitlink; overlay
-        # lib from sources/scopehal (with its nested submodule content).
-        git -C "$wrapper" -c submodule."$LIB_SUBMODULE".update=none submodule update --init --recursive
-        mkdir -p "$lib"
-        rsync -a --delete --exclude='.git' "$scopehal/" "$lib/"
-    )
+    # ngscopeclient builds directly from sources/scopehal-apps (Sipeed fork). Its
+    # nested `lib` submodule IS the scopehal fork carrying the SLogic driver, so
+    # init scopehal-apps's own submodules (lib + xptools/log/VkFFT/canvas_ity,
+    # src/imgui, ...) on the host before rsync — no build-time overlay.
+    test -d "$SOURCES/scopehal-apps/.git" -o -f "$SOURCES/scopehal-apps/.git" || {
+        echo "sources/scopehal-apps not checked out — run: git submodule update --init --recursive sources/scopehal-apps" >&2
+        exit 1
+    }
+    git -C "$SOURCES/scopehal-apps" submodule update --init --recursive
     # scopehal-apps versions itself from `git describe`; the build copy has no
     # .git, so compute the version on the host and pass it to CMake.
-    NG_VER=$(git -C "$SOURCES/ngscopeclient" describe --always --tags 2>/dev/null || echo v0.0.0-0)
-    NG_VER_LONG=$(git -C "$SOURCES/ngscopeclient" describe --always --tags --long 2>/dev/null || echo v0.0.0-0-g0000000)
+    # The sipeed fork has no version tag, so describe --tags yields a bare SHA that
+    # scopehal-apps's CMake VERSIONINFO parser rejects — synthesize a valid v-tag.
+    NG_VER=$(git -C "$SOURCES/scopehal-apps" describe --always --tags 2>/dev/null || echo "")
+    NG_VER_LONG=$(git -C "$SOURCES/scopehal-apps" describe --always --tags --long 2>/dev/null || echo "")
+    case "$NG_VER" in
+        v[0-9]*) ;;
+        *)  NG_COUNT=$(git -C "$SOURCES/scopehal-apps" rev-list --count HEAD 2>/dev/null || echo 0)
+            NG_SHA=$(git -C "$SOURCES/scopehal-apps" rev-parse --short HEAD 2>/dev/null || echo 0000000)
+            NG_VER="v0.0.0-$NG_COUNT-g$NG_SHA"
+            NG_VER_LONG="$NG_VER" ;;
+    esac
+    # Keep the in-tree build directory name (the Makefile target is ngscopeclient).
     rsync -a --delete --exclude=.git --exclude=build \
-        "$SOURCES/ngscopeclient/" "$BUILD_ROOT/ngscopeclient/"
+        "$SOURCES/scopehal-apps/" "$BUILD_ROOT/ngscopeclient/"
     cp "$BUILD_HOME/common/Makefile" "$BUILD_ROOT/Makefile"
     # ngscopeclient's deps (yaml-cpp, glfw, glslang, shaderc, spirv-tools, vulkan-*)
     # live in Homebrew, not the conda prefix, so add /opt/homebrew to the CMake +
@@ -903,7 +903,7 @@ EOF
         xcrun stapler staple "$NG_DMG"
         xcrun stapler validate "$NG_DMG"
     fi
-    git -C "$SOURCES/ngscopeclient" rev-parse HEAD > "$STAMP_DIR/ngscopeclient"
+    git -C "$SOURCES/scopehal-apps" rev-parse HEAD > "$STAMP_DIR/ngscopeclient"
     ls -lh "$NG_DMG"
 fi
 

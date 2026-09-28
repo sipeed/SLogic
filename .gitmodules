@@ -26,11 +26,7 @@
 	path = sources/sigrok-bridge
 	url = https://github.com/sipeed/sigrok-bridge-server.git
 	branch = main
-[submodule "sources/ngscopeclient"]
-	path = sources/ngscopeclient
-	url = https://github.com/ngscopeclient/scopehal-apps.git
+[submodule "sources/scopehal-apps"]
+	path = sources/scopehal-apps
+	url = https://github.com/sipeed/scopehal-apps.git
 	branch = master
-[submodule "sources/scopehal"]
-	path = sources/scopehal
-	url = https://github.com/sipeed/scopehal.git
-	branch = feat/SLogic

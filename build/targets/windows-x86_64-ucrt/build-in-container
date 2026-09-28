@@ -60,10 +60,10 @@ for product in pulseview slogicview sigrok-cli all-logic; do
     product_build[$product]=$shared_build
     stamp=""
     [ ! -f "$STAMP_DIR/$product" ] || stamp=$(cat "$STAMP_DIR/$product")
-    output_name="$product-SLogic-windows-x86_64-ucrt.exe"
-    [ "$product" = pulseview ] && output_name="PulseView-SLogic-windows-x86_64-ucrt.exe"
-    [ "$product" = slogicview ] && output_name="SLogicView-SLogic-windows-x86_64-ucrt.exe"
-    [ "$product" = all-logic ] && output_name="AllLogic-windows-x86_64-ucrt.exe"
+    output_name="$product-SLogic-windows-x86_64.exe"
+    [ "$product" = pulseview ] && output_name="PulseView-SLogic-windows-x86_64.exe"
+    [ "$product" = slogicview ] && output_name="SLogicView-SLogic-windows-x86_64.exe"
+    [ "$product" = all-logic ] && output_name="AllLogic-SLogic-windows-x86_64.exe"
     if [ "${stamp//-dirty/}" != "${state//-dirty/}" ]; then
         product_build[$product]=1
         rm -rf "$BUILD_ROOT/build-win32/$product" "$BUILD_ROOT/$product-portable" \
@@ -124,7 +124,7 @@ if has_product sigrok-cli && [ "${product_build[sigrok-cli]}" -eq 1 ]; then
 fi
 if has_product all-logic && [ "${product_build[all-logic]}" -eq 1 ]; then
     PRODUCT=all-logic DISPLAY_NAME=AllLogic BINARY_NAME=AllLogic \
-        OUTPUT_NAME=AllLogic-windows-x86_64-ucrt.exe \
+        OUTPUT_NAME=AllLogic-SLogic-windows-x86_64.exe \
         BUILD_JOBS="$product_jobs" bash /c/target/build-pulseview-in-container &
     pids+=("$!")
 fi

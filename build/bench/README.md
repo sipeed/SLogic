@@ -6,7 +6,7 @@ interchangeable transports, one JSON document per run.
 ```sh
 # smoke cell (32ch @ 200 MHz, Emulation, 1 s), 10 repetitions
 ./build/bench/capture_bench.py --transport sigrok-cli \
-    --sigrok-cli "artifact/dev-nightly/<ver>/linux-x86_64-musl/sigrok-cli-SLogic-linux-x86_64-musl.AppImage" \
+    --sigrok-cli "artifact/dev-nightly/<ver>/linux-x86_64-musl/sigrok-cli-SLogic-linux-x86_64.AppImage" \
     smoke
 
 # same cell against a running ALL-LOGIC host (MCP on 127.0.0.1:10110);

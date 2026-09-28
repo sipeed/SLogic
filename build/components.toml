@@ -49,15 +49,12 @@ source = "sigrok-bridge"
 dependencies = []
 targets = ["linux-x86_64-glibc", "macos-arm64"]
 
-# ngscopeclient (scopehal-apps GUI). The superproject records pure-upstream
-# scopehal-apps; its `lib` submodule (the scopehal fork carrying the SLogic
-# driver) is supplied from the repo's own `sources/scopehal` submodule and
-# overlaid onto `lib` at build time by each target driver. override_submodule
-# marks `lib` as build-overridden so the clean-check ignores its dirtiness; the
-# fork's pin is the sources/scopehal gitlink. See build/common/ngscopeclient-lib.env.
+# ngscopeclient (scopehal-apps GUI). Built directly from the sources/scopehal-apps
+# submodule (Sipeed fork): its nested `lib` submodule IS the scopehal fork carrying
+# the SLogic driver, so each target driver inits scopehal-apps's own submodules
+# (`lib`, `src/imgui`, ...) and builds them in place. No build-time overlay.
 [ngscopeclient]
 kind = "product"
-source = "ngscopeclient"
+source = "scopehal-apps"
 dependencies = []
 targets = ["linux-x86_64-glibc", "macos-arm64"]
-override_submodule = "lib"
