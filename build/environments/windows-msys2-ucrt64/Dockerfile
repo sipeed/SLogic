@@ -45,3 +45,19 @@ RUN /usr/bin/msys2 -c "pacman -S --noconfirm --needed \
         mingw-w64-ucrt-x86_64-7zip \
         mingw-w64-ucrt-x86_64-nsis \
     && pacman -Scc --noconfirm"
+
+# ngscopeclient (Vulkan/GLFW GUI) build stack. Separate layer so it does not
+# invalidate the Qt/sigrok toolchain layer above. libusb + hidapi (needed by the
+# native SLogic driver) are already installed above.
+RUN /usr/bin/msys2 -c "pacman -S --noconfirm --needed \
+        mingw-w64-ucrt-x86_64-ninja \
+        mingw-w64-ucrt-x86_64-vulkan-headers \
+        mingw-w64-ucrt-x86_64-vulkan-loader \
+        mingw-w64-ucrt-x86_64-glslang \
+        mingw-w64-ucrt-x86_64-spirv-tools \
+        mingw-w64-ucrt-x86_64-shaderc \
+        mingw-w64-ucrt-x86_64-glfw \
+        mingw-w64-ucrt-x86_64-yaml-cpp \
+        mingw-w64-ucrt-x86_64-libsigc++ \
+        mingw-w64-ucrt-x86_64-libpng \
+    && pacman -Scc --noconfirm"

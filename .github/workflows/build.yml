@@ -28,6 +28,10 @@ on:
         description: macOS only — build just ngscopeclient (skip the Qt GUIs)
         type: boolean
         default: false
+      windows_only:
+        description: Skip the glibc + macOS jobs (pair with ngscope to test just the Windows ngscopeclient build)
+        type: boolean
+        default: false
   push:
     tags:
       - 'release-*'
@@ -90,12 +94,26 @@ jobs:
           fi
 
       - name: Build ${{ matrix.target }}
+        if: ${{ github.event.inputs.windows_only != 'true' }}
         run: |
           python3 build/scripts/build \
             --target "${{ matrix.target }}" \
             --product "${{ matrix.products }}" ${{ matrix.extra }}
 
+      # ngscopeclient (Vulkan/GLFW) on Windows is opt-in (slow under Wine): only
+      # when ngscope is requested or on a release tag. Reuses the buildenv image
+      # loaded above; --jobs 3 keeps Wine's process table from overflowing.
+      - name: Build ngscopeclient (Windows, opt-in)
+        if: ${{ matrix.target == 'windows-x86_64-ucrt' && env.NGSCOPE == 'true' }}
+        run: |
+          python3 build/scripts/build \
+            --target windows-x86_64-ucrt \
+            --product ngscopeclient --build-type Release --jobs 3
+
+      # On windows_only runs the musl entry builds nothing (Qt build skipped), so
+      # only the windows entry (with the ngscope artifact) uploads.
       - uses: actions/upload-artifact@v4
+        if: ${{ matrix.target == 'windows-x86_64-ucrt' || github.event.inputs.windows_only != 'true' }}
         with:
           name: ${{ matrix.target }}
           path: artifact/**
@@ -107,7 +125,7 @@ jobs:
   # build is slow.
   glibc-target:
     name: linux-x86_64-glibc
-    if: ${{ (github.event_name == 'push' || github.event.inputs.ngscope == 'true') && github.event.inputs.macos_only != 'true' && github.event.inputs.ngscope_only != 'true' }}
+    if: ${{ (github.event_name == 'push' || github.event.inputs.ngscope == 'true') && github.event.inputs.macos_only != 'true' && github.event.inputs.ngscope_only != 'true' && github.event.inputs.windows_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +176,7 @@ jobs:
 
   macos-target:
     name: macos-arm64
+    if: ${{ github.event.inputs.windows_only != 'true' }}
     runs-on: macos-14   # Apple Silicon
     steps:
       - uses: actions/checkout@v4

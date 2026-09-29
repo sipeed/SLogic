@@ -48,4 +48,4 @@ targets = ["linux-x86_64-musl", "windows-x86_64-ucrt", "macos-arm64"]
 kind = "product"
 source = "scopehal-apps"
 dependencies = []
-targets = ["linux-x86_64-glibc", "macos-arm64"]
+targets = ["linux-x86_64-glibc", "macos-arm64", "windows-x86_64-ucrt"]

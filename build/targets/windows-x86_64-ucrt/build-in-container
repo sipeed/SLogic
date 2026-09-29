@@ -12,6 +12,12 @@ has_product() {
     case ",$PRODUCTS," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 
+# The shared libsigrok/libsigrokdecode prefix is only needed by the Qt/sigrok
+# products; ngscopeclient is self-contained (its own scopehal fork + libusb).
+needs_sigrok() {
+    has_product pulseview || has_product slogicview || has_product sigrok-cli || has_product all-logic
+}
+
 mkdir -p "$BUILD_ROOT" "$STAMP_DIR" "$OUTPUT" "$BUILD_ROOT/tmp"
 export TMPDIR="$BUILD_ROOT/tmp" TMP="$BUILD_ROOT/tmp" TEMP="$BUILD_ROOT/tmp"
 export CCACHE_DIR=/c/cache/ccache
@@ -51,13 +57,19 @@ elif [ "$shared_stamp" != "$shared_state" ] || [[ "$shared_state" == *-dirty* ]]
     shared_build=1
 fi
 declare -A product_build product_state
-for product in pulseview slogicview sigrok-cli all-logic; do
+for product in pulseview slogicview sigrok-cli all-logic ngscopeclient; do
     has_product "$product" || continue
     variable="SOURCE_${product^^}_STATE"
     variable=${variable//-/_}
     state="${!variable:-unknown}:${BUILD_TYPE:-Release}"
     product_state[$product]=$state
-    product_build[$product]=$shared_build
+    # ngscopeclient is independent of the shared sigrok prefix, so it is not tied
+    # to shared_build; it rebuilds only when its own source state changes.
+    if [ "$product" = ngscopeclient ]; then
+        product_build[$product]=0
+    else
+        product_build[$product]=$shared_build
+    fi
     stamp=""
     [ ! -f "$STAMP_DIR/$product" ] || stamp=$(cat "$STAMP_DIR/$product")
     output_name="$product-SLogic-windows-x86_64.exe"
@@ -74,11 +86,15 @@ for product in pulseview slogicview sigrok-cli all-logic; do
 done
 
 echo "Synchronizing sources into persistent Windows workspace..."
-projects=(libsigrok libsigrokdecode)
+projects=()
+needs_sigrok && projects+=(libsigrok libsigrokdecode)
 has_product pulseview && projects+=(pulseview)
 has_product slogicview && projects+=(slogicview)
 has_product sigrok-cli && projects+=(sigrok-cli)
 has_product all-logic && projects+=(all-logic)
+# ngscopeclient is sourced from the scopehal-apps checkout (its nested submodules,
+# incl. lib=scopehal fork, are checked out on the host and synced as plain files).
+has_product ngscopeclient && projects+=(scopehal-apps)
 for project in "${projects[@]}"; do
     rsync -a --delete --exclude=.git --exclude=build \
         "$SOURCE_ROOT/$project/" "$BUILD_ROOT/$project/"
@@ -86,12 +102,12 @@ done
 cp /c/support/Makefile "$BUILD_ROOT/Makefile"
 
 cd "$BUILD_ROOT"
-if [ "$shared_build" -eq 1 ]; then
+if needs_sigrok && [ "$shared_build" -eq 1 ]; then
     echo "Building shared libsigrok and libsigrokdecode once ($JOBS jobs)..."
     make JOBS="$JOBS" BUILD_TYPE="${BUILD_TYPE:-Release}" \
         LIBSIGROKDECODE_CONFIGURE_OPTS="--enable-shared --enable-static" \
         install-sigrok-dependencies
-else
+elif needs_sigrok; then
     echo "Reusing shared Windows libsigrok and libsigrokdecode prefix."
 fi
 
@@ -101,6 +117,7 @@ has_product pulseview && [ "${product_build[pulseview]}" -eq 1 ] && product_coun
 has_product slogicview && [ "${product_build[slogicview]}" -eq 1 ] && product_count=$((product_count + 1))
 has_product sigrok-cli && [ "${product_build[sigrok-cli]}" -eq 1 ] && product_count=$((product_count + 1))
 has_product all-logic && [ "${product_build[all-logic]}" -eq 1 ] && product_count=$((product_count + 1))
+has_product ngscopeclient && [ "${product_build[ngscopeclient]}" -eq 1 ] && product_count=$((product_count + 1))
 if [ "$product_count" -gt 0 ]; then
     product_jobs=$((JOBS / product_count))
     [ "$product_jobs" -ge 1 ] || product_jobs=1
@@ -128,13 +145,19 @@ if has_product all-logic && [ "${product_build[all-logic]}" -eq 1 ]; then
         BUILD_JOBS="$product_jobs" bash /c/target/build-pulseview-in-container &
     pids+=("$!")
 fi
+if has_product ngscopeclient && [ "${product_build[ngscopeclient]}" -eq 1 ]; then
+    NGSCOPECLIENT_PKG_VERSION="${NGSCOPECLIENT_PKG_VERSION:-}" \
+        NGSCOPECLIENT_PKG_VERSION_LONG="${NGSCOPECLIENT_PKG_VERSION_LONG:-}" \
+        BUILD_JOBS="$product_jobs" bash /c/target/build-ngscopeclient-in-container &
+    pids+=("$!")
+fi
 failed=0
 for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
 [ "$failed" -eq 0 ] || { echo "One or more Windows product builds failed" >&2; exit 1; }
 
 printf '%s\n' "$logic_key" > "$STAMP_DIR/build-logic"
 printf '%s\n' "$shared_state" > "$STAMP_DIR/shared"
-for product in pulseview slogicview sigrok-cli all-logic; do
+for product in pulseview slogicview sigrok-cli all-logic ngscopeclient; do
     has_product "$product" || continue
     printf '%s\n' "${product_state[$product]}" > "$STAMP_DIR/$product"
 done

@@ -35,13 +35,29 @@ for project in libsigrok libsigrokdecode; do
 done
 IFS=, read -r -a product_list <<<"$PRODUCTS"
 for product in "${product_list[@]}"; do
-    case "$product" in pulseview|slogicview|sigrok-cli|all-logic) ;; *) echo "Unsupported Windows product: $product" >&2; exit 2 ;; esac
-    test -d "$SOURCES/$product" || { echo "Missing source: $product" >&2; exit 2; }
+    case "$product" in pulseview|slogicview|sigrok-cli|all-logic|ngscopeclient) ;; *) echo "Unsupported Windows product: $product" >&2; exit 2 ;; esac
+    src=$product; [ "$product" = ngscopeclient ] && src=scopehal-apps
+    test -d "$SOURCES/$src" || { echo "Missing source: $src" >&2; exit 2; }
 done
 case ",$PRODUCTS," in *,pulseview,*) ;; *) rm -f "$OUTPUT/PulseView-SLogic-windows-x86_64.exe" ;; esac
 case ",$PRODUCTS," in *,slogicview,*) ;; *) rm -f "$OUTPUT/SLogicView-SLogic-windows-x86_64.exe" ;; esac
 case ",$PRODUCTS," in *,sigrok-cli,*) ;; *) rm -f "$OUTPUT/sigrok-cli-SLogic-windows-x86_64.exe" ;; esac
 case ",$PRODUCTS," in *,all-logic,*) ;; *) rm -f "$OUTPUT/AllLogic-SLogic-windows-x86_64.exe" ;; esac
+case ",$PRODUCTS," in *,ngscopeclient,*) ;; *) rm -f "$OUTPUT/ngscopeclient-SLogic-windows-x86_64.exe" "$OUTPUT/ngscopeclient-SLogic-"*"-windows-x86_64.exe" ;; esac
+
+# ngscopeclient builds directly from sources/scopehal-apps (Sipeed fork); init its
+# nested submodules (lib=scopehal fork with the SLogic driver, src/imgui, ...) on
+# the host before the container run, since submodule gitdirs live in the
+# superproject and are invisible in-container.
+init_scopehal_apps_submodules() {
+    local apps="$SOURCES/scopehal-apps"
+    test -d "$apps/.git" -o -f "$apps/.git" || {
+        echo "sources/scopehal-apps not checked out — run: git submodule update --init --recursive sources/scopehal-apps" >&2
+        exit 1
+    }
+    git -C "$apps" submodule update --init --recursive
+}
+case ",$PRODUCTS," in *,ngscopeclient,*) init_scopehal_apps_submodules ;; esac
 
 AVAILABLE_GB=$(df --output=avail -BG "$BUILD_HOME" | tail -1 | tr -dc '0-9')
 if [ -z "$AVAILABLE_GB" ] || [ "$AVAILABLE_GB" -lt "${MIN_FREE_GB:-20}" ]; then
@@ -68,16 +84,35 @@ fi
 # superproject and are not visible inside the container. A trailing -dirty
 # marks uncommitted changes so the container rebuilds incrementally.
 source_env=()
-for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli all-logic; do
+for project in libsigrok libsigrokdecode pulseview slogicview sigrok-cli all-logic ngscopeclient; do
     variable="SOURCE_${project^^}_STATE"
     variable=${variable//-/_}
+    src=$project
+    [ "$project" = ngscopeclient ] && src=scopehal-apps
     state=""
-    if git -C "$SOURCES/$project" rev-parse --git-dir >/dev/null 2>&1; then
-        state=$(git -C "$SOURCES/$project" rev-parse HEAD)
-        [ -z "$(git -C "$SOURCES/$project" status --porcelain)" ] || state="$state-dirty"
+    if git -C "$SOURCES/$src" rev-parse --git-dir >/dev/null 2>&1; then
+        state=$(git -C "$SOURCES/$src" rev-parse HEAD)
+        [ -z "$(git -C "$SOURCES/$src" status --porcelain)" ] || state="$state-dirty"
     fi
     source_env+=( -e "$variable=$state" )
 done
+
+# scopehal-apps versions itself from `git describe`; sources are synced into the
+# container without .git, so compute the version on the host and pass it in (the
+# sipeed fork has no v-tag, so synthesize a valid vMAJOR.MINOR.PATCH-N-gSHA).
+if git -C "$SOURCES/scopehal-apps" rev-parse --git-dir >/dev/null 2>&1; then
+    ng_ver=$(git -C "$SOURCES/scopehal-apps" describe --always --tags 2>/dev/null)
+    ng_ver_long=$(git -C "$SOURCES/scopehal-apps" describe --always --tags --long 2>/dev/null)
+    case "$ng_ver" in
+        v[0-9]*) ;;
+        *)  ng_count=$(git -C "$SOURCES/scopehal-apps" rev-list --count HEAD 2>/dev/null || echo 0)
+            ng_sha=$(git -C "$SOURCES/scopehal-apps" rev-parse --short HEAD 2>/dev/null || echo 0000000)
+            ng_ver="v0.0.0-$ng_count-g$ng_sha"
+            ng_ver_long="$ng_ver" ;;
+    esac
+    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION=$ng_ver" )
+    source_env+=( -e "NGSCOPECLIENT_PKG_VERSION_LONG=$ng_ver_long" )
+fi
 
 "$ENGINE" run --rm \
     --cpus="$CPUS" --memory="${CONTAINER_MEMORY:-0}" --memory-swap="${CONTAINER_MEMORY_SWAP:-0}" \
