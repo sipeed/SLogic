@@ -323,6 +323,5 @@ jobs:
             dist/**/*.exe
             dist/**/*.dmg
             dist/**/*.zip
-            dist/**/*.tar.gz
           fail_on_unmatched_files: true
           generate_release_notes: true
