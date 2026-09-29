@@ -372,18 +372,6 @@ for pass in 1 2 3 4 5 6 7 8; do
     [ "$added" -eq 1 ] || break
 done
 
-# ngscopeclient detects Vulkan at runtime via glfwVulkanSupported(), which dlopens the
-# loader by the unversioned names "libvulkan.1.dylib" / "libvulkan.dylib". dylibbundler
-# only ships the fully-versioned loader (e.g. libvulkan.1.4.357.dylib) that the binary
-# link-references, so glfw finds nothing and reports "vulkan support not available",
-# and ngscope aborts before opening a window. Add the aliases glfw looks for.
-_vkloader=$(ls "$CONTENTS/Frameworks"/libvulkan.1.[0-9]*.dylib 2>/dev/null | head -1)
-if [ -n "$_vkloader" ]; then
-    _vkbase=$(basename "$_vkloader")
-    ln -sf "$_vkbase" "$CONTENTS/Frameworks/libvulkan.1.dylib"
-    ln -sf "$_vkbase" "$CONTENTS/Frameworks/libvulkan.dylib"
-fi
-
 # Python extension modules and some Qt plugins can retain @rpath references
 # even after the matching libraries have been copied.  They may be loaded
 # dynamically, so they cannot rely on an LC_RPATH inherited from the main
@@ -812,6 +800,19 @@ EOF
         -s /opt/homebrew/lib
     close_bundle_dependencies "$NG_CONTENTS"
     verify_deployment_target "$NG_CONTENTS"
+
+    # glfw detects Vulkan via glfwVulkanSupported(), which dlopens the loader by the
+    # unversioned names "libvulkan.1.dylib" / "libvulkan.dylib". dylibbundler only ships
+    # the fully-versioned loader (e.g. libvulkan.1.4.357.dylib) the binary link-references,
+    # so glfw finds nothing, reports "vulkan support not available", and ngscope aborts
+    # before opening a window. Add the aliases glfw looks for.
+    _vkloader=$(ls "$NG_CONTENTS/Frameworks"/libvulkan.1.[0-9]*.dylib 2>/dev/null | head -1)
+    if [ -n "$_vkloader" ]; then
+        _vkbase=$(basename "$_vkloader")
+        ( cd "$NG_CONTENTS/Frameworks" && ln -sf "$_vkbase" libvulkan.1.dylib && ln -sf "$_vkbase" libvulkan.dylib )
+    else
+        echo "WARNING: no bundled libvulkan loader found in ngscopeclient Frameworks" >&2
+    fi
 
     cat > "$BUILD_ROOT/ngscope-launcher.c" <<'EOF'
 #include <mach-o/dyld.h>
