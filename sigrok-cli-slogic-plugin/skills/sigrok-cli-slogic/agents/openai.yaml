@@ -1,0 +1,4 @@
+interface:
+  display_name: "SLogic Capture & Decode"
+  short_description: "Capture SLogic waveforms and decode bus protocols"
+  default_prompt: "Use $sigrok-cli-slogic to capture or inspect an SLogic waveform and decode it with explicit protocol pin mappings."

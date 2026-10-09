@@ -1,0 +1,22 @@
+{
+  "name": "sigrok-cli-slogic-plugin",
+  "version": "0.1.0",
+  "description": "Capture SLogic waveforms and decode protocols through sigrok-cli",
+  "author": {
+    "name": "Sipeed"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "sigrok-cli SLogic",
+    "shortDescription": "Capture and decode SLogic waveforms",
+    "longDescription": "Discover SLogic and DSLogic devices, run bounded captures, save sigrok sessions, and decode protocols with explicit pin mappings.",
+    "developerName": "Sipeed",
+    "category": "Developer Tools",
+    "capabilities": ["Hardware", "Protocol decoding"],
+    "defaultPrompt": [
+      "Scan for connected SLogic devices.",
+      "Capture a bounded SLogic waveform.",
+      "Decode a saved waveform with explicit pin mappings."
+    ]
+  }
+}
