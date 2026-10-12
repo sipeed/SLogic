@@ -82,6 +82,26 @@ def _bps_to_gen(bps: int) -> str:
     return "unknown"
 
 
+def probe_usb_speed(cli: "Path", env: dict, spec: dict) -> str:
+    """Empirically classify the USB link where the OS can't report it (Windows): run a short
+    raw-link USB-test capture and compare the measured rate to the model's native aggregate.
+    A full 10G link clears ~70% of the 10G standard on this test; a 5G link tops out near half.
+    Only meaningful for a 10G-native model (is it full 10G or degraded to 5G?)."""
+    nch, mhz = spec["modes"][-1]
+    samples = int(mhz * 1_000_000 * 150 / 1000)   # ~150 ms probe
+    cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern=USB connection test"
+    try:
+        rc, _, err = run(cli, env, ["-d", DRIVER, "-l", "4", "--config", cfg,
+                                    "--samples", str(samples), "-O", "binary", "-o", os.devnull],
+                         timeout=60)
+    except Exception:
+        return "unknown"
+    speeds = SPEED_RE.findall(err)
+    if rc != 0 or not speeds:
+        return "unknown"
+    return "10G" if float(speeds[-1][0]) >= 0.70 * spec["std"] else "5G"
+
+
 def detect_usb_speed() -> str:
     """Best-effort USB link speed of the SLogic device: '10G', '5G', or 'unknown'."""
     try:
@@ -274,6 +294,15 @@ def main() -> int:
     # model (16U3) keeps its native rates. Windows can't report the link gen (shown "unknown").
     spec = MODELS.get(info["model"], MODELS[DEFAULT_MODEL])
     link = args.usb_speed or detect_usb_speed()
+    src = "forced" if args.usb_speed else "auto"
+    if not args.usb_speed and link == "unknown":
+        # OS can't report the link gen (Windows). A 5G-native model is at its native link;
+        # a 10G-native model might be degraded to 5G, so probe it empirically.
+        if spec["native"] == "10G":
+            probed = probe_usb_speed(cli, env, spec)
+            link, src = (probed, "probe") if probed != "unknown" else (spec["native"], "assume")
+        else:
+            link, src = spec["native"], "native"
     if spec["native"] == "10G" and link == "5G":
         modes = [(ch, mhz // 2) for ch, mhz in spec["modes"]]
         std = spec["std"] // 2
@@ -282,7 +311,6 @@ def main() -> int:
         modes = spec["modes"]
         std = spec["std"]
         link_desc = link if link != "unknown" else f"unknown (assume {spec['native']})"
-    src = "forced" if args.usb_speed else "auto" if link != "unknown" else "override with --usb-speed"
     info["link"], info["std"] = link, std
     print(f"  [----] 2.3  usb-link                  {link_desc} ({src}) - "
           f"{info['model']} standard {std} MB/s\n")
