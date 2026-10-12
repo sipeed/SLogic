@@ -1,25 +1,33 @@
-# SLogic32U3 回归测试清单
+# SLogic16U3 / 32U3 回归测试清单
 
-**范围**:SLogic32U3,sigrok-cli / libsigrok 链(SLogicView / PulseView 同一条驱动,一并覆盖),
-三平台 Linux / macOS / Windows。每次固件或上位机更新后跑一遍,通过再发布。
+**范围**:SLogic16U3 与 SLogic32U3(脚本按 `--scan` **自动识别型号**并选对应档位/标准),
+sigrok-cli / libsigrok 链(SLogicView / PulseView 同一条驱动,一并覆盖),三平台 Linux / macOS /
+Windows。每次固件或上位机更新后跑一遍,通过再发布。(文件名沿用 `-slogic32u3`,现已覆盖两款。)
 
-**方式**:绝大部分由脚本 `build/bench/slogic_selftest.py` 自动完成,三平台各跑一次;少量人工补充。
-条目标注 **[脚本]**(自动)/ **[人工]**。
+**方式**:绝大部分由脚本 `build/bench/slogic_selftest.py` 自动完成(自动识别 16U3/32U3),三平台各跑一次;
+少量人工补充。条目标注 **[脚本]**(自动)/ **[人工]**。
 
 ---
 
 ## 1. 规格与预期(判定依据)
 
+| 项 | SLogic16U3 | SLogic32U3 |
+|---|---|---|
+| 通道 | 16 路 D0–D15 | 32 路 D0–D31 |
+| 接口 / 运行态 PID | USB3 **5Gbps**,`359F:3031` | USB3 **10Gbps**,`359F:3032` |
+| 通道档位 ↔ 最高采样率 | 4ch@800 · 8ch@400 · 16ch@200 MHz | 4ch@1400 · 8ch@800 · 16ch@400 · 32ch@200 MHz |
+| 聚合标准(满速) | **400 MB/s**(原生 5G) | **800 MB/s**(10G;降到 5G 则减半 400) |
+
+> DFU 固件态为 USB2 FS,PID `359F:30F1`(采集驱动看不到,正常)。档位以 `--show` 为准,来源 `slogic/slogic*.c`。
+
+**两款共用**:
+
 | 项 | 规格 / 预期 |
 |---|---|
-| 通道 | 32 路 D0–D31 |
-| 枚举 | 运行态 **USB3 10Gbps(SuperSpeed)**,PID `359F:3032/3031/0300`;DFU 固件态为 USB2 FS,PID `359F:30F1`(采集驱动看不到,正常) |
-| 通道档位 ↔ 最高采样率 | 4ch@1400 · 8ch@800 · 16ch@400 · 32ch@200 MHz(来源 `slogic/slogic32u3.c`;以 `--show` 为准) |
 | 数字阈值 | 单一全局比较器,`voltage_threshold` 是「低-高」对(单阈值写 `1.7-1.7`),0–6 V |
 | 采集模式 | `Normal`(实采)/ `USB connection test`(裸链路冲刺,max_speed)/ `Emulation`(结构化图案) |
 | 关键语义 | `--config` 多项用**冒号 `:` 分隔**(不是逗号)。`logic_channels=N` 选档位 + 自动使能 D0..D(N-1) + 重算最高速率,故写在 `samplerate` 前;超限速率被**截断并告警**。触发匹配 `0 1 r f e`。 |
-| 链路 → 标准 | 10G/SuperSpeed+ → 聚合标准 **800 MB/s**;5G/SuperSpeed → 采样率与标准**同时减半**(**400 MB/s**) |
-| 预期性能 | Normal/Emulation 各档位**实测平均速率 ≥ 期望的 90%**(仅"收齐"不算满速——驱动会按主机节奏排空,所以要测真实速率);USB-test(max_speed)裸链路 **≥ 标准、常大幅超标**(10G 实测 ≈986 MB/s) |
+| 预期性能 | Normal/Emulation 各档位**实测平均速率 ≥ 期望的 90%**(仅"收齐"不算满速——驱动按主机节奏排空;驱动 avg 从**首字节**起计,已排除冷启动/下电唤醒,首次冷采也显示真实速率);USB-test(max_speed)裸链路 **≥ 标准**(32U3 实测 ≈900–986,16U3 受设备聚合上限 ≈410) |
 
 ---
 
@@ -40,9 +48,10 @@
 
 > macOS 首次运行若被 Gatekeeper 拦:`xattr -dr com.apple.quarantine <解压目录>` 放行(内部测试即可)。
 
-### 步骤 2 — 插上 SLogic32U3
+### 步骤 2 — 插上设备(SLogic16U3 或 32U3)
 
-直连机身 USB-3(10Gbps)口、**别过 hub / 用好线**(链路需稳在 10G;5G 会把速率与标准减半)。
+直连机身 USB-3 口、**别过 hub / 用好线**。32U3 需稳在 **10G**(落到 5G 则速率与标准减半);16U3 原生
+**5G**(聚合 400 即满速)。脚本从 `--scan` 自动识别型号。
 
 ### 步骤 3 — 跑脚本
 
@@ -70,20 +79,26 @@ python3 slogic_selftest.py --sigrok-cli <步骤1的路径> \
 | 1.1 | `--version` | 三库版本齐全;打印被测 CLI 的 sha256 | |
 | 1.2 | `-L` | 列出 `sipeed-slogic-analyzer` 驱动 | |
 | 1.3 | `--protocol-decoders uart --show` | UART decoder 能加载 | |
-| 2.1 | `-d ... --scan`(`-l 4`) | 识别 1 台 SLogic32U3,打印 VID:PID + S/N | |
+| 2.1 | `-d ... --scan`(`-l 4`) | 识别 1 台 SLogic16U3/32U3,打印型号 + VID:PID + S/N | |
 | 2.2 | `-d ... --show` | 列出 D0..D31、采样率表、config 键 | |
 | 2.3 | 链路速率(Linux sysfs / macOS ioreg 自动探测) | 运行态 10G;**Windows 探不到**→显示 `unknown` 默认按 10G,见 §4 H2 | |
 | 3.1 | 各档位 × {Emulation,Normal} 实测速率(写 `/dev/null`,读驱动 `-l 4` avg) | 每行 avg ≥ 期望的 90%、100% 收齐 | |
 | 3.2 | maxspeed:`pattern=USB connection test` 裸链路冲刺 | avg ≥ 标准(常大幅超标,10G≈986) | |
-| 3.3 | `logic_channels=32:samplerate=1400m` | 速率被截到 200 MHz 并告警(档位联动) | |
+| 3.3 | 超限采样率(按型号:32U3 `32ch@1400m` / 16U3 `16ch@400m`) | 速率被截到档位上限并告警(档位联动) | |
 | 3.4 | stress:20 次 open/采集/close 循环(`--stress-iters` 可调) | 全成功,无崩/无泄漏 | |
 | 4.1 | 解码黄金 `.sr`(`--golden-dir`:UART,按需 SPI/I²C) | 与黄金输出一致 | |
 
 > macOS 首次运行 CLI 产物若被 Gatekeeper 拦,内部测试放行即可(非 GUI 签名范畴)。
 
-### 已知问题
+### 说明:Windows 吞吐(历史问题,已解决)
 
-- **Windows 吞吐掉速(2026-10)**:即便确认插在 10G 口,3.1/3.2 实测仅约 **430 MB/s**(≈ Linux 的一半;裸 USB-test 也只有 ~414,Linux 同设备 986)。瓶颈在 **WinUSB 传输层**(非设备/固件——同一设备 Linux 满速),属驱动侧问题(transfer size / 队列深度 / RAW_IO),定位与修复另立任务。Windows 回归暂以"功能链全过 + 对应链路档达标"为准,满速 10G 以 Linux 为准。
+早期 Windows 原生采集跑不满(16U3 ~390/400、32U3 被压),成因有三,现已逐一解决:
+
+1. **libusb WinUSB 未开 RAW_IO** → 后端只保持 1 个 bulk-IN 在途,高速率吞吐受限。**2.1.0 起驱动启用 RAW_IO**。
+2. **固件下电阈值过短(0.56s)** → 用例间空闲触发下电,每次采集先付 ~7.5ms 唤醒(500ms 用例 ≈98%)。**固件 lp6(SN 202610121551)起阈值提到 4.5s**。
+3. **测速把冷启动唤醒算进去** → 均值偏低、首次冷采显示"不满速"。**驱动 avg 改为从首字节起计**,已排除冷启动/下电唤醒。
+
+结论:够格主机(10G 口 + 好线)下 **32U3 满 800、16U3 满 400,无丢包**(实测 MRTIVO2)。弱机(USB 栈/端口差,如某些机器 ~445 封顶)可能仍受自身硬件所限;用 `--usb-speed` 指定实际链路,必要时以 Linux 为满速基准交叉验证。
 
 ---
 
@@ -104,7 +119,7 @@ python3 slogic_selftest.py --sigrok-cli <步骤1的路径> \
 
 ## 5. 签收
 
-- [ ] 三平台 §3 脚本各跑一次均 PASS(Windows 见「已知问题」)。
+- [ ] 三平台 §3 脚本各跑一次均 PASS(型号自动识别;Windows 满速背景见上「说明」)。
 - [ ] §4 人工项按触发条件完成(每次发布至少 H1)。
 - [ ] 失败项已立 issue、修复、重跑。
 - [ ] → 以上完成后才按 [release-process.md](release-process.md) 打 tag。

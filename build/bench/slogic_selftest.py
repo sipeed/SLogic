@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SLogic32U3 cross-platform self-test over sigrok-cli.
+"""SLogic16U3/32U3 cross-platform self-test over sigrok-cli.
 
 Runs the automatable functional AND performance regression items from
 `build/docs/regression-checklist-slogic32u3.md` through a SLogic-capable
@@ -31,8 +31,9 @@ Usage:
     (Windows: py -3 build\\bench\\slogic_selftest.py --sigrok-cli <...\\sigrok-cli.exe>)
 
 --sigrok-cli accepts a native executable, a Windows portable directory
-(containing bin/sigrok-cli.exe), or a mounted macOS .app. Plug a SLogic32U3 into
-the machine first. Exits non-zero if any check FAILS (or the device is missing,
+(containing bin/sigrok-cli.exe), or a mounted macOS .app. The device model
+(SLogic16U3 or 32U3) is auto-detected from the scan and sets the rate table.
+Plug one into the machine first. Exits non-zero if any check FAILS (or the device is missing,
 unless --allow-no-device).
 """
 
@@ -49,13 +50,19 @@ import time
 from pathlib import Path
 
 DRIVER = "sipeed-slogic-analyzer"
-MODEL = "SLogic32U3"
 VENDOR_ID = "359f"
-# channel mode -> max sample rate in MHz at USB 10G/SuperSpeed+ (source: slogic/slogic32u3.c).
-# Aggregate wire rate = channels * MHz / 8 MB/s: 4ch@1400 = 700 MB/s, the rest = 800 MB/s.
-# At USB 5G/SuperSpeed the sustainable aggregate halves, so the rates (and the standard) halve.
-MODES_10G = [(4, 1400), (8, 800), (16, 400), (32, 200)]
-STD_MBPS_10G = 800
+# Per-model channel-mode -> max sample rate (MHz) and aggregate standard (MB/s) at the model's
+# native USB link (aggregate = channels * MHz / 8; source slogic/slogic*.c). 32U3 is USB 10G
+# (~800 MB/s; 4ch@1400 = 700), 16U3 is USB 5G (~400 MB/s). A 10G-native model negotiated down to a
+# 5G link halves both rates and standard. "clamp" is an over-limit config (rate above the channel
+# mode's max) the driver must clamp + warn about.
+MODELS = {
+    "SLogic32U3": {"modes": [(4, 1400), (8, 800), (16, 400), (32, 200)], "std": 800,
+                   "native": "10G", "clamp": "logic_channels=32:samplerate=1400m"},
+    "SLogic16U3": {"modes": [(4, 800), (8, 400), (16, 200)], "std": 400,
+                   "native": "5G", "clamp": "logic_channels=16:samplerate=400m"},
+}
+DEFAULT_MODEL = "SLogic32U3"
 DURATION_MS = 500           # per-mode capture; long enough for the sustained-rate average to settle
 MIN_RATE_PCT = 90           # measured avg must reach this % of the expected per-mode rate
 STRESS_ITERS = 20           # open/capture/close cycles for the leak/crash stress gate
@@ -205,9 +212,10 @@ def main() -> int:
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     info = {"date": started[:10], "platform": f"{sys.platform} ({os.name})", "os": sys.platform,
             "cli": str(cli), "sha256": _sha256(cli), "version": "?",
-            "model": MODEL, "vidpid": "?", "serial": "?", "link": "?", "std": STD_MBPS_10G,
+            "model": DEFAULT_MODEL, "vidpid": "?", "serial": "?", "link": "?",
+            "std": MODELS[DEFAULT_MODEL]["std"],
             "settings": f"duration {args.duration_ms}ms  min-rate {args.min_rate_pct}%"}
-    print(f"SLogic32U3 self-test  |  {started}")
+    print(f"SLogic self-test  |  {started}")
     print(f"sigrok-cli: {cli}\nplatform:   {info['platform']}\n")
 
     # --- 1. functional chain (device-independent) ---
@@ -238,14 +246,18 @@ def main() -> int:
     msn = re.search(r"S/N:\s*([A-Za-z0-9]+)", scan_out + scan_err)
     if msn:
         info["serial"] = msn.group(1)
-    scan_detail = (f"{MODEL}  VID:PID {info['vidpid']}  S/N {info['serial']}" if device_present
+    mmod = re.search(r"SLogic\s*(\d+)\s*U3", scan_out)   # "Sipeed SLogic16 U3" / "SLogic32 U3"
+    if mmod:
+        name = f"SLogic{mmod.group(1)}U3"
+        info["model"] = name if name in MODELS else info["model"]
+    scan_detail = (f"{info['model']}  VID:PID {info['vidpid']}  S/N {info['serial']}" if device_present
                    else (scan_out.strip().splitlines()[0] if scan_out.strip() else "no device found"))
     rep.add("2.1", "scan", "PASS" if device_present else ("SKIP" if args.allow_no_device else "FAIL"),
             scan_detail, 0.0)
 
     if not device_present:
         if not args.allow_no_device:
-            print("\nNo SLogic device found — connect a SLogic32U3 (or pass --allow-no-device).")
+            print("\nNo SLogic device found — connect a SLogic16U3/32U3 (or pass --allow-no-device).")
         return _finish(rep, info)
 
     # --- device-dependent ---
@@ -258,19 +270,22 @@ def main() -> int:
         return ok, "lists samplerate + logic_channels" if ok else "show missing keys"
     rep.add("2.2", "show", *timed(c_show))
 
-    # 2.3 USB link speed sets the aggregate throughput standard: 10G/SuperSpeed+ sustains the full
-    # rates below (800 MB/s); 5G/SuperSpeed halves both the rates and the standard (400 MB/s).
-    speed = args.usb_speed or detect_usb_speed()
-    if speed == "5G":
-        modes = [(ch, mhz // 2) for ch, mhz in MODES_10G]
-        std = STD_MBPS_10G // 2
+    # 2.3 Per-model rates + standard. A 10G-native model (32U3) on a 5G link halves both; a 5G-native
+    # model (16U3) keeps its native rates. Windows can't report the link gen (shown "unknown").
+    spec = MODELS.get(info["model"], MODELS[DEFAULT_MODEL])
+    link = args.usb_speed or detect_usb_speed()
+    if spec["native"] == "10G" and link == "5G":
+        modes = [(ch, mhz // 2) for ch, mhz in spec["modes"]]
+        std = spec["std"] // 2
+        link_desc = "5G (10G link degraded)"
     else:
-        modes = MODES_10G
-        std = STD_MBPS_10G
-    src = "forced" if args.usb_speed else ("auto" if speed != "unknown" else "undetected, assume 10G")
-    info["link"], info["std"] = speed, std
-    note = "" if speed != "unknown" else "; confirm manually / override with --usb-speed"
-    print(f"  [----] 2.3  usb-link                  {speed} ({src}) - standard {std} MB/s{note}\n")
+        modes = spec["modes"]
+        std = spec["std"]
+        link_desc = link if link != "unknown" else f"unknown (assume {spec['native']})"
+    src = "forced" if args.usb_speed else "auto" if link != "unknown" else "override with --usb-speed"
+    info["link"], info["std"] = link, std
+    print(f"  [----] 2.3  usb-link                  {link_desc} ({src}) - "
+          f"{info['model']} standard {std} MB/s\n")
 
     # Real throughput test. The driver can "drain at the host's pace": when the USB link is slower
     # than the analyzer it still delivers every requested sample, just below real time — so a
@@ -339,7 +354,7 @@ def main() -> int:
     rep.add("3.2", "maxspeed-USBtest", *timed(c_maxspeed))
 
     def c_clamp():
-        cfg = "logic_channels=32:samplerate=1400m:pattern=Emulation"
+        cfg = spec["clamp"] + ":pattern=Emulation"  # rate over the model's channel-mode max
         rc, _, err = run(cli, env, ["-d", DRIVER, "--config", cfg, "--samples", "1000", "-O", "binary"], binary=True)
         ok = rc == 0 and bool(CLAMP_RE.search(err))
         return ok, "over-limit rate clamped with warning" if ok else f"no clamp warning (rc={rc})"
