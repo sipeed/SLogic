@@ -174,12 +174,16 @@ the adapter reshapes it (libsigrok byte-expansion for < 8 ch → `SR_DF_LOGIC`,
 or all-logic transpose → `LA_CROSS_DATA` channel planes) is **not** part of
 `libslogic` (section 5).
 
-### First-transfer drop
+### First-transfer drop (per-model quirk)
 
-The first 4 bytes of the stream are a hardware artifact and must be dropped
-(`SLOGIC_DROP_FIRST_BYTES = 4`). Canonical implementation: a `drop_left`
-counter initialised to 4, decremented across however many transfers it takes to
-consume 4 bytes (section 6.3).
+Some firmware opens its output gate in the middle of a 256-bit sample word, so
+the first word is a random partial (2–6 samples). The driver drops the leading
+`model->first_drop_bytes` of the stream to discard that partial head, via a
+`drop_left` counter decremented across however many transfers it takes
+(section 6.3). SLogic32U3 firmware now gates on whole-word boundaries
+(SN 202610120954+) and sets `first_drop_bytes = 0` — the first word is a real
+sample, so nothing is dropped. Combo8 (a different protocol) also sets 0; only
+SLogic16U3 still sets 4.
 
 ### Transfer sizing (drift — section 6.5)
 
@@ -319,11 +323,14 @@ release-pinned, so the migration keeps its current rule until the conformance
 vectors and the Phase 0 baseline confirm the new policy does not mask a real
 stall.
 
-### 6.3 First-4-byte drop — RESOLVED toward all-logic
+### 6.3 First-4-byte drop — RESOLVED toward all-logic, now a per-model quirk
 
-libsigrok drops 4 bytes only on the first transfer (`first_here`), assuming the
-first transfer is ≥ 4 bytes; all-logic uses a `drop_left` counter that survives
-a pathologically short first transfer. **Canonical:** the `drop_left` counter.
+The drop count is per-model (`slogic_model.first_drop_bytes`): 4 for SLogic16U3
+only; 0 for SLogic32U3 (firmware gates on whole-word boundaries, SN
+202610120954+) and Combo8 (different protocol, no partial head). **Canonical
+mechanism:** the `drop_left` counter (survives a
+pathologically short first transfer), applied by `slogic_apply_first_drop`.
+libsigrok's old inline `first_here` drop is gone.
 
 ### 6.4 AUX poll retry count — RESOLVED
 
