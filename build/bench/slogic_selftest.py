@@ -13,7 +13,9 @@ No external signal source is needed:
     channel mode's MAX rate and checks the driver's *measured* sustained rate
     (from -l 4) against the expected rate. A complete capture alone is NOT full
     speed: the driver can "drain at the host's pace", delivering every sample
-    below real time, so throughput must be measured, not inferred;
+    below real time, so throughput must be measured, not inferred. The driver's
+    avg clock starts at the first byte, so a cold-start/power-down wake-up does
+    not drag the figure — even the first capture after an idle reads true rate;
   * decode regression uses golden `.sr` files (optional, via --golden-dir).
 
 Deep throughput characterization (wall-time / baseline matrix) stays in
