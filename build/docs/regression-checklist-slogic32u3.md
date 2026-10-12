@@ -23,21 +23,41 @@
 
 ---
 
-## 2. 三平台执行:各跑一次脚本
+## 2. 三平台执行:下载 sigrok-cli → 跑脚本
 
-每台插上 SLogic32U3,运行(Windows 用 `py -3`):
+每台机器按三步走,各出一次 PASS/FAIL + 可归档记录。脚本 `build/bench/slogic_selftest.py`
+是**单文件、零依赖**(仅标准库),可直接从仓库跑,或把这一个文件拷到被测机旁再跑。
+
+### 步骤 1 — 下载本平台的 sigrok-cli
+
+到 Releases 页 <https://github.com/sipeed/SLogic/releases> 选对应版本,下载本平台的 **sigrok-cli** 资产:
+
+| 平台 | 下载资产 | 落地处理 | `--sigrok-cli` 指向 |
+|---|---|---|---|
+| Linux | `sigrok-cli-SLogic-<ver>-linux-x86_64.AppImage` | `chmod +x` | 该 AppImage |
+| Windows | `sigrok-cli-SLogic-<ver>-windows-x86_64.exe` | 无(单文件) | 该 `.exe` |
+| macOS | `sigrok-cli-SLogic-<ver>-macos-arm64.zip` | 解压 | 解压目录内 `sigrok-cli-SLogic-macos-arm64/sigrok-cli` |
+
+> macOS 首次运行若被 Gatekeeper 拦:`xattr -dr com.apple.quarantine <解压目录>` 放行(内部测试即可)。
+
+### 步骤 2 — 插上 SLogic32U3
+
+直连机身 USB-3(10Gbps)口、**别过 hub / 用好线**(链路需稳在 10G;5G 会把速率与标准减半)。
+
+### 步骤 3 — 跑脚本
 
 ```sh
-python3 build/bench/slogic_selftest.py --sigrok-cli <本平台的 sigrok-cli-SLogic 产物> \
+python3 slogic_selftest.py --sigrok-cli <步骤1的路径> \
     [--golden-dir <黄金目录>] [--usb-speed 10G|5G] [--min-rate-pct 90]
 ```
 
-脚本自动跑完下面所有 **[脚本]** 项,一键 PASS/FAIL,失败非零退出。无需信号源(采集用 Emulation/USB-test
-图案写 `/dev/null`、读驱动 `-l 4` 实测速率;解码用预录黄金 `.sr`)。`--sigrok-cli` 接可执行文件 / Windows
-便携目录 / 已挂载的 macOS `.app`。
+- Windows 用 `py -3 slogic_selftest.py ...`,路径写 `C:\...\sigrok-cli-SLogic-<ver>-windows-x86_64.exe`。
+- 从仓库跑则路径为 `build/bench/slogic_selftest.py`。
+- 无需信号源:采集用板载 Emulation/USB-test 图案写空设备、读驱动 `-l 4` 实测速率;解码用预录黄金 `.sr`。
 
-**输出直接对应本清单**:每行前缀即下表 `#`(如 `[PASS] 3.1 rate-32ch@200MHz-Emulation …`),
-链路探不到时用 `--usb-speed` 指定。运行结尾打印**溯源信息 + 一行可粘贴到 §5 签收表的记录**,执行即归档。
+脚本一键跑完下面所有 **[脚本]** 项,全 PASS 退出 0、任一 FAIL 退出非零。**输出直接对应本清单**:每行前缀即下表 `#`
+(如 `[PASS] 3.1 rate-32ch@200MHz-Emulation …`)。Windows 探不到链路时用 `--usb-speed` 指定。运行结尾打印
+**溯源信息 + 一行可粘贴到 §5 签收表的记录**,执行即归档。
 
 ---
 
