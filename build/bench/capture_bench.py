@@ -40,7 +40,7 @@ WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SCHEMA = "slogic-capture-bench/1"
 
 # Channel mode -> top samplerate; every top rate saturates the same link.
-TOP_RATE_HZ = {32: 200_000_000, 16: 400_000_000, 8: 800_000_000, 4: 1_600_000_000}
+TOP_RATE_HZ = {32: 200_000_000, 16: 400_000_000, 8: 800_000_000, 4: 1_400_000_000}
 PATTERNS = ("Normal", "USB connection test", "Emulation")
 DURATIONS_S = (1, 2, 4, 10)
 SMOKE = {"channels": 32, "pattern": "Emulation", "duration_s": 1}
@@ -192,28 +192,32 @@ class McpTransport(Transport):
         except OSError:
             return None
 
-    STREAM_DONE = re.compile(
-        rb"stream done: ([0-9.]+) MB in ([0-9.]+) s \((\d+) MB/s\), "
-        rb"[0-9.]+ MSa, host tail (\d+) ms")
+    # libslogic core's standard per-capture line (every host prints the same):
+    #   slogic-report v1 ... bytes=N mbps=X ... span_ms=S cold_ms=C ...
+    REPORT = re.compile(rb"slogic-report v1 ([^\n]*)")
 
     def _driver_report(self, chunk):
-        """The driver's own per-capture line is the device-side truth for
-        stream time and host tail; keep it alongside our host-side view."""
+        """The core's per-capture report is the device-side truth for stream
+        rate and time; keep it alongside our host-side view."""
         if chunk is None:
             return None
-        matches = self.STREAM_DONE.findall(chunk)
+        matches = self.REPORT.findall(chunk)
         if not matches:
             return None
-        mb, secs, rate, tail_ms = matches[-1]
-        return {"stream_mb": float(mb), "stream_s": float(secs),
-                "stream_mbps": int(rate), "host_tail_ms": int(tail_ms)}
+        kv = dict(t.split(b"=", 1) for t in matches[-1].split() if b"=" in t)
+        num = lambda k: float(kv[k]) if kv.get(k, b"nan") != b"nan" else 0.0
+        return {"stream_mb": int(kv.get(b"bytes", b"0")) / 1e6,
+                "stream_s": num(b"span_ms") / 1000.0,
+                "stream_mbps": num(b"mbps"), "cold_ms": num(b"cold_ms"),
+                "fit_n": int(kv.get(b"fit_n", b"0")),
+                "end": kv.get(b"end", b"?").decode()}
 
     def capture(self, cell: Cell) -> RunResult:
         notes = []
         self._call("configure", {
             "pattern": cell.pattern,
             "channel_mode": MCP_CHANNEL_MODE_INDEX[cell.channels],
-            "samplerate": f"{cell.samplerate_hz // 1_000_000}MHz",
+            "samplerate_hz": cell.samplerate_hz,
             "sample_count": cell.requested_samples,
         })
         log_at = self._log_offset()
@@ -258,11 +262,11 @@ class McpTransport(Transport):
         chunk = self._log_since(log_at)
         driver = self._driver_report(chunk)
         if driver:
-            notes.append(f"driver: {driver['stream_mb']:.0f} MB in "
-                         f"{driver['stream_s']:.3f} s ({driver['stream_mbps']} MB/s), "
-                         f"host tail {driver['host_tail_ms']} ms")
-            stream = driver["stream_s"]
-            tail = driver["host_tail_ms"] / 1000.0
+            notes.append(f"driver: end={driver['end']} {driver['stream_mb']:.0f} MB, "
+                         f"{driver['stream_mbps']:.1f} MB/s over {driver['stream_s']:.3f} s "
+                         f"(fit {driver['fit_n']}), cold start {driver['cold_ms']:.1f} ms")
+            if driver["stream_s"] > 0:
+                stream = driver["stream_s"]
         backpressure = (None if chunk is None
                         else b"USB link slower than the analyzer" in chunk)
         return RunResult(
