@@ -18,9 +18,10 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * This is the single source of truth for how the host talks to the device.
- * It depends ONLY on <stdint.h>/<stddef.h> and the caller-supplied transport;
- * it never includes libsigrok or libusb headers, so both driver front ends can
- * vendor a byte-identical copy and adapt it with a thin porting layer.
+ * The header needs only <stdint.h>/<stddef.h>. slogic.c and slogic_data.c are
+ * pure C; slogic_usb.c owns the capture engine on libusb + pthread. It never
+ * includes libsigrok headers, so every front end vendors a byte-identical copy
+ * and adapts it with a thin porting layer.
  *
  * The wire protocol it implements is specified in build/docs/slogic-protocol.md.
  */
@@ -43,6 +44,7 @@ enum {
 	SLOGIC_ERR_IO = -3,
 	SLOGIC_ERR_TIMEOUT = -4,
 	SLOGIC_ERR_NODEV = -5,
+	SLOGIC_ERR_BUSY = -6,   /* interface claimed elsewhere / capture already live */
 };
 
 /* Samplerate/bandwidth helper — no libsigrok SR_MHZ dependency. */
@@ -428,6 +430,75 @@ typedef struct slogic_report {
 /* "slogic-report v1 key=value ..." on one line (build/docs/slogic-protocol.md
  * section 9). Returns the snprintf length. */
 int slogic_report_format(const slogic_report *r, char *buf, size_t n);
+
+/* ======================================================================
+ * Device + capture engine (slogic_usb.c): libusb + pthread.
+ *
+ * The core owns the device handle, one libusb event thread per open device,
+ * the bulk transfer ring and the producer->consumer queue. The host only
+ * calls slogic_capture_poll() from a thread of its own choosing (session
+ * source, acquisition loop, ...) and receives exact, trimmed samples through
+ * its sink. Every control transfer (stop, re-arm, run) happens inside poll /
+ * start / destroy on that thread, never in a USB callback.
+ *
+ * Threading: call everything for one device from one host thread, except
+ * slogic_capture_stop(), which may be called from any thread.
+ * ====================================================================== */
+
+struct libusb_context;
+struct libusb_device;
+struct libusb_device_handle;
+
+/* "usb/<bus>-<port>[.<port>...]" — same format as libsigrok's
+ * usb_get_port_path(), i.e. sdi->connection_id. */
+int slogic_port_path(struct libusb_device *dev, char *buf, size_t n);
+/* First SLogic (pid 0 = any known model) matching port_path, else serial;
+ * both NULL takes the first one. Finds the analyzer again after it
+ * re-enumerated with a new address. *out is referenced (libusb_unref_device). */
+int slogic_find(struct libusb_context *ctx, uint16_t pid, const char *port_path,
+		const char *serial, struct libusb_device **out);
+/* Negotiated link of a (not necessarily open) device. */
+slogic_link slogic_usb_link(struct libusb_device *dev);
+
+typedef struct slogic_dev slogic_dev;
+/* Open, claim interface 0, enable RAW_IO where libusb supports it, start the
+ * event thread, then bring the device to a known idle state (stop, drain,
+ * reset) so a capture left running by a killed process does not leak into
+ * the next one. */
+int slogic_dev_open(struct libusb_context *ctx, struct libusb_device *dev,
+		    slogic_log_fn log, void *log_user, slogic_dev **out);
+/* Destroys a live capture first. */
+void slogic_dev_close(slogic_dev *d);
+const slogic_model *slogic_dev_model(const slogic_dev *d);
+slogic_link slogic_dev_link(const slogic_dev *d);
+struct libusb_device_handle *slogic_dev_handle(const slogic_dev *d);
+
+typedef struct slogic_capture slogic_capture;
+typedef struct slogic_capture_config {
+	slogic_config dev;             /* channels, samplerate, threshold, pattern */
+	uint64_t limit_samples;        /* 0 = continuous until stopped */
+	slogic_trigger_spec trigger;   /* all SLOGIC_TRIG_X = untriggered */
+	uint64_t pretrigger_samples;   /* host computes, e.g. limit * ratio / 100 */
+	slogic_sink sink;
+	uint64_t max_queue_bytes;      /* 0 = unbounded */
+} slogic_capture_config;
+
+enum { SLOGIC_CAP_RUNNING = 0, SLOGIC_CAP_DONE = 1 };
+
+int slogic_capture_start(slogic_dev *d, const slogic_capture_config *c,
+			 slogic_capture **out);
+/* Request the end of the capture; any thread, idempotent. */
+void slogic_capture_stop(slogic_capture *c);
+/* Consumer step: delivers up to max_buffers queued buffers (waiting up to
+ * wait_ms for one) and runs re-arm / teardown. Returns SLOGIC_CAP_RUNNING
+ * until the capture has fully ended (ring idle, device stopped, report logged
+ * at INFO), then SLOGIC_CAP_DONE. */
+int slogic_capture_poll(slogic_capture *c, unsigned max_buffers, unsigned wait_ms);
+void slogic_capture_report(const slogic_capture *c, slogic_report *r);
+/* Stops if needed, waits up to 2 s for the ring to go idle, frees. If the ring
+ * never drains the memory is deliberately leaked (a late callback stays
+ * memory-safe). No sink callback runs once destroy has started. */
+void slogic_capture_destroy(slogic_capture *c);
 
 #ifdef __cplusplus
 }

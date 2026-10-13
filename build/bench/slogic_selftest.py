@@ -68,11 +68,26 @@ DURATION_MS = 500           # per-mode capture; long enough for the sustained-ra
 MIN_RATE_PCT = 90           # measured avg must reach this % of the expected per-mode rate
 STRESS_ITERS = 20           # open/capture/close cycles for the leak/crash stress gate
 CLAMP_RE = re.compile(r"wrap to|limit|not supported", re.IGNORECASE)
-# driver -l 4 throughput line, e.g.:
-#   ... Got 2000000000/2000000000(100.00%) => speed: 429.17MBps, 416.78MBps(avg), 800MBps(exp) => +116.513=4886.442ms.
+# Standard capture report (libslogic core, every host, log level info), e.g.:
+#   slogic-report v1 model=SLogic32U3 ch=32 rate_mhz=200 end=ok samples=100000000/100000000
+#   bytes=400000000 mbps=799.4 exp_mbps=800.0 fit_n=146 span_ms=497.3 cold_ms=7.6 ...
+# mbps is the least-squares slope of cumulative bytes over transfer completion times, so it does
+# not depend on transfer size and excludes the device's cold start (reported separately).
+REPORT_RE = re.compile(r"slogic-report v1 (.*)$", re.M)
+# Legacy (<= 2.2.0) driver -l 4 line, kept so older builds can still be measured.
 SPEED_RE = re.compile(r"speed:\s*[\d.]+MBps,\s*([\d.]+)MBps\(avg\),\s*([\d.]+)MBps\(exp\)")
-GOT_RE = re.compile(r"Got\s+(\d+)/\d+\(([\d.]+)%\)")   # bytes received, captured %
-TIME_RE = re.compile(r"\+[\d.]+=([\d.]+)ms")            # cumulative device streaming time (ms)
+GOT_RE = re.compile(r"Got\s+(\d+)/\d+\(([\d.]+)%\)")
+# Firmware issue F1 (duplicate block 0 at the head) is known in these (channels, MHz) modes;
+# reported as KNOWN-FW, not FAIL, until the firmware fix lands (then the check is strict).
+KNOWN_FW_F1 = {(8, 800), (4, 200), (4, 800), (4, 1400)}
+
+
+def parse_report(err: str):
+    """Last slogic-report line as a dict, or None."""
+    found = REPORT_RE.findall(err)
+    if not found:
+        return None
+    return dict(t.split("=", 1) for t in found[-1].split() if "=" in t)
 
 
 def _bps_to_gen(bps: int) -> str:
@@ -97,10 +112,14 @@ def probe_usb_speed(cli: "Path", env: dict, spec: dict) -> str:
                          timeout=60)
     except Exception:
         return "unknown"
-    speeds = SPEED_RE.findall(err)
-    if rc != 0 or not speeds:
+    kv, speeds = parse_report(err), SPEED_RE.findall(err)
+    if rc != 0 or not (kv or speeds):
         return "unknown"
-    return "10G" if float(speeds[-1][0]) >= 0.70 * spec["std"] else "5G"
+    try:
+        mbps = float(kv["mbps"]) if kv else float(speeds[-1][0])
+    except ValueError:
+        return "unknown"
+    return "10G" if mbps >= 0.70 * spec["std"] else "5G"
 
 
 def detect_usb_speed() -> str:
@@ -200,15 +219,17 @@ class Report:
         self.rows.append((cid, name, status, detail, ms))
         print(f"  [{status:4}] {cid:4} {name:27}{int(ms):5d}ms  {detail}")
 
-    def counts(self) -> tuple[int, int, int]:
+    def counts(self) -> tuple[int, int, int, int]:
         st = [r[2] for r in self.rows]
-        return st.count("PASS"), st.count("FAIL"), st.count("SKIP")
+        return st.count("PASS"), st.count("FAIL"), st.count("SKIP"), st.count("KFW")
 
 
 def timed(fn):
+    """fn returns (ok, detail); ok may also be a status string such as "KFW"."""
     t0 = time.monotonic()
     ok, detail = fn()
-    return ("PASS" if ok else "FAIL"), detail, (time.monotonic() - t0) * 1000
+    status = ok if isinstance(ok, str) else ("PASS" if ok else "FAIL")
+    return status, detail, (time.monotonic() - t0) * 1000
 
 
 # ------------------------------------------------------------------------ checks
@@ -216,8 +237,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sigrok-cli", required=True, help="path to sigrok-cli (executable, portable dir, or .app)")
     ap.add_argument("--golden-dir", help="directory of <name>.sr + <name>.args + <name>.expected decode fixtures")
-    ap.add_argument("--duration-ms", type=int, default=DURATION_MS,
-                    help=f"per-mode capture duration in ms (default {DURATION_MS}; longer = steadier rate average)")
+    ap.add_argument("--duration-ms", type=int, default=None,
+                    help=f"per-mode capture duration in ms (default {DURATION_MS}, 1500 on macOS whose large "
+                         "USB transfers leave few points for the rate fit)")
     ap.add_argument("--min-rate-pct", type=int, default=MIN_RATE_PCT,
                     help=f"measured avg rate must reach this %% of the expected per-mode rate (default {MIN_RATE_PCT})")
     ap.add_argument("--stress-iters", type=int, default=STRESS_ITERS,
@@ -226,6 +248,8 @@ def main() -> int:
                     help="force the USB link speed standard (default: auto-detect); 5G halves rates + the MB/s standard")
     ap.add_argument("--allow-no-device", action="store_true", help="run device-independent checks only if no device is found")
     args = ap.parse_args()
+    if args.duration_ms is None:
+        args.duration_ms = 1500 if sys.platform == "darwin" else DURATION_MS
 
     cli = resolve_cli(args.sigrok_cli)
     env = cli_env(cli)
@@ -326,8 +350,8 @@ def main() -> int:
     cap_timeout = 120 + args.duration_ms * 60 // 1000
 
     def measure_rate(nch, mhz, pattern):
-        """Capture to the null device with the -l 4 speed log.
-        Returns ((avg, exp, captured%, volume_MB, device_ms), None) or (None, errmsg)."""
+        """Capture to the null device and read the driver's report.
+        Returns (dict(mbps, exp, ok_count, mb, span_ms, cold_ms, fit_n, end), None) or (None, errmsg)."""
         samples = int(mhz * 1_000_000 * args.duration_ms / 1000)
         cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern={pattern}"  # ':' separates settings
         rc, _, err = run(cli, env, ["-d", DRIVER, "-l", "4", "--config", cfg,
@@ -335,20 +359,42 @@ def main() -> int:
                          timeout=cap_timeout)
         if rc != 0:
             return None, f"rc={rc} {err.strip().splitlines()[-1] if err.strip() else ''}"
-        speeds, gots, times = SPEED_RE.findall(err), GOT_RE.findall(err), TIME_RE.findall(err)
+        kv = parse_report(err)
+        if kv:
+            got, _, lim = kv.get("samples", "0/0").partition("/")
+            num = lambda k: float(kv[k]) if kv.get(k, "nan") != "nan" else 0.0
+            return dict(mbps=num("mbps"), exp=num("exp_mbps"), ok_count=got == lim,
+                        mb=int(kv.get("bytes", 0)) / 1e6, span_ms=num("span_ms"),
+                        cold_ms=num("cold_ms"), fit_n=int(kv.get("fit_n", 0)),
+                        end=kv.get("end", "?")), None
+        speeds, gots = SPEED_RE.findall(err), GOT_RE.findall(err)   # legacy <= 2.2.0 driver
         if not speeds:
-            return None, "driver reported no throughput (need -l 4 'speed:' lines)"
-        avg, exp = float(speeds[-1][0]), float(speeds[-1][1])
-        vol_mb = (int(gots[-1][0]) / 1e6) if gots else 0.0   # bytes received -> MB
+            return None, "driver printed no slogic-report line (need -l 3 or more)"
         cap = float(gots[-1][1]) if gots else 0.0
-        dev_ms = float(times[-1]) if times else 0.0          # device streaming time
-        return (avg, exp, cap, vol_mb, dev_ms), None
+        return dict(mbps=float(speeds[-1][0]), exp=float(speeds[-1][1]), ok_count=cap >= 99.9,
+                    mb=(int(gots[-1][0]) / 1e6) if gots else 0.0, span_ms=0.0, cold_ms=0.0,
+                    fit_n=99, end="ok"), None
 
-    # Aligned columns so rates line up for an at-a-glance compare. The device streaming time +
-    # volume let you sanity-check the rate by hand (volume / time ≈ avg).
-    def fmt(avg, exp, pct, vol_mb, dev_ms, cap):
-        return (f"{avg:6.1f} /{exp:6.1f} MB/s  {pct:4.0f}%   "
-                f"{vol_mb:7.1f} MB  {dev_ms:7.1f} ms   {cap:5.1f}% cap")
+    # Aligned columns so rates line up for an at-a-glance compare; volume, fitted span and the
+    # cold start make each figure checkable by hand.
+    def fmt(r, ref):
+        pct = (r["mbps"] / ref * 100.0) if ref else 0.0
+        return (f"{r['mbps']:6.1f} /{ref:6.1f} MB/s  {pct:4.0f}%   {r['mb']:7.1f} MB  "
+                f"{r['span_ms']:7.1f} ms  cold {r['cold_ms']:5.1f} ms  fit {r['fit_n']}"), pct
+
+    def judge(r, ref, min_pct, slow_word):
+        detail, pct = fmt(r, ref)
+        if r["end"] != "ok":
+            return False, f"end={r['end']} " + detail
+        if not r["ok_count"]:
+            return False, "incomplete " + detail
+        if r["fit_n"] < 3:
+            return False, "few transfers for the rate fit, raise --duration-ms; " + detail
+        if pct < min_pct:
+            return False, slow_word + detail
+        if pct > 105:
+            return False, "implausible (measurement bug?) " + detail
+        return True, detail
 
     # Normal + Emulation at each mode's MAX rate: the sampled data rate must reach the expected rate.
     for nch, mhz in modes:
@@ -357,14 +403,7 @@ def main() -> int:
                 res, errmsg = measure_rate(nch, mhz, pat)
                 if res is None:
                     return False, errmsg
-                avg, exp, cap, vol_mb, dev_ms = res
-                pct = (avg / exp * 100.0) if exp else 0.0
-                detail = fmt(avg, exp, pct, vol_mb, dev_ms, cap)
-                if cap < 99.9:
-                    return False, "incomplete " + detail
-                if pct < args.min_rate_pct:
-                    return False, "SLOW       " + detail
-                return True, detail
+                return judge(res, res["exp"], args.min_rate_pct, "SLOW       ")
             rep.add("3.1", f"rate-{nch}ch@{mhz}MHz-{pat}", *timed(c_rate))
 
     # USB connection test (the max-speed pattern): raw link throughput, must reach or exceed the standard.
@@ -373,14 +412,10 @@ def main() -> int:
         res, errmsg = measure_rate(nch, mhz, "USB connection test")
         if res is None:
             return False, errmsg
-        avg, _exp, cap, vol_mb, dev_ms = res
-        pct = (avg / std * 100.0) if std else 0.0   # vs the aggregate standard, not the configured rate
-        detail = fmt(avg, float(std), pct, vol_mb, dev_ms, cap)
-        if cap < 99.9:
-            return False, "incomplete " + detail
-        if avg < std:
-            return False, "below std  " + detail
-        return True, detail
+        ok, detail = judge(res, float(std), 100, "below std  ")
+        if not ok and detail.startswith("implausible"):
+            return True, detail[len("implausible (measurement bug?) "):]  # link may exceed std
+        return ok, detail
     rep.add("3.2", "maxspeed-USBtest", *timed(c_maxspeed))
 
     def c_clamp():
@@ -403,6 +438,85 @@ def main() -> int:
                 return False, f"iter {i + 1}/{n} failed (rc={rc}) {last}"
         return True, f"{n}x open/capture/close all OK"
     rep.add("3.4", "stress", *timed(c_stress))
+
+    # --- 3.5-3.8: the few firmware-team cases kept here (host_test.py stays with them) ---
+    def unit_of(nch):
+        return 1 if nch <= 8 else nch // 8
+
+    def capture_bytes(nch, mhz, n, pattern="Emulation", extra=None):
+        cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern={pattern}"
+        rc, out, err = run(cli, env, ["-d", DRIVER, "-l", "3", "--config", cfg, "--samples", str(n),
+                                      *(extra or []), "-O", "binary"], binary=True, timeout=60)
+        return rc, out, err
+
+    # 3.5 exact sample counts, incl. counts whose packed size is not word-aligned (4ch n=1002
+    # used to crash, odd counts lost a sample).
+    def c_counts(nch, mhz):
+        bad = []
+        for n in (999, 1001, 1002, 1004, 100001):
+            rc, out, _ = capture_bytes(nch, mhz, n)
+            if rc != 0 or len(out) != n * unit_of(nch):
+                bad.append(f"n={n}: rc={rc} got {len(out)}B want {n * unit_of(nch)}B")
+        return (not bad), ("999/1001/1002/1004/100001 exact" if not bad else "; ".join(bad))
+    for nch, mhz in modes:
+        rep.add("3.5", f"exact-count-{nch}ch@{mhz}MHz", *timed(lambda nch=nch, mhz=mhz: c_counts(nch, mhz)))
+
+    # 3.6 Emulation head: firmware F1 emits a duplicate block 0 (8 samples) at the head in
+    # some modes. Known modes -> KNOWN-FW (does not fail the run); elsewhere -> FAIL.
+    def c_head(nch, mhz):
+        u = unit_of(nch)
+        rc, out, _ = capture_bytes(nch, mhz, 64)
+        if rc != 0 or len(out) < 16 * u:
+            return False, f"rc={rc} got {len(out)}B"
+        dup = out[:8 * u] == out[8 * u:16 * u]
+        if not dup:
+            return True, "head OK (no duplicate block)" + (
+                " - F1 looks fixed in this mode" if (nch, mhz) in KNOWN_FW_F1 else "")
+        if (nch, mhz) in KNOWN_FW_F1:
+            return "KFW", "duplicate block 0 at head (firmware F1, known)"
+        return False, "duplicate block 0 at head (firmware F1) in an unexpected mode"
+    for nch, mhz in modes:
+        rep.add("3.6", f"emu-head-{nch}ch@{mhz}MHz", *timed(lambda nch=nch, mhz=mhz: c_head(nch, mhz)))
+
+    # 3.7 continuous capture starts, streams and stops on request.
+    def c_continuous():
+        nch, mhz = modes[-1]
+        cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern=Emulation"
+        p = subprocess.Popen([str(cli), "-d", DRIVER, "-l", "3", "--config", cfg, "--continuous",
+                              "-O", "binary", "-o", os.devnull], env=env, stdin=subprocess.PIPE,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        time.sleep(2.0)
+        try:
+            p.stdin.write(b"x\n")
+            p.stdin.flush()
+        except OSError:
+            pass
+        try:
+            _, err = p.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            return False, "did not stop within 15 s of the stop request"
+        kv = parse_report(err.decode("utf-8", "replace"))
+        if p.returncode != 0 or not kv:
+            return False, f"rc={p.returncode}, no report (continuous not supported?)"
+        got = int(kv.get("samples", "0/0").split("/")[0])
+        ok = kv.get("end") == "ok" and got > 0
+        return ok, f"end={kv.get('end')} streamed {got} samples, {kv.get('mbps')} MB/s"
+    rep.add("3.7", "continuous", *timed(c_continuous))
+
+    # 3.8 trigger position: 10% pre-trigger lands exactly at sample 10000 of 100000.
+    def c_trigger():
+        nch = 8 if any(c == 8 for c, _ in modes) else modes[0][0]
+        rc, out, err = capture_bytes(nch, 10, 100000,
+                                     extra=["--triggers", "D0=r", "--config", "captureratio=10"])
+        kv = parse_report(err.decode("utf-8", "replace") if isinstance(err, bytes) else err)
+        if rc != 0 or len(out) != 100000:
+            return False, f"rc={rc} got {len(out)}B want 100000B"
+        edge = (out[9999] & 1) == 0 and (out[10000] & 1) == 1
+        trig = kv.get("trig") if kv else None
+        ok = edge and trig == "at:10000,pre:10000"
+        return ok, f"trig={trig}, D0 {out[9999] & 1}->{out[10000] & 1} at sample 10000"
+    rep.add("3.8", "trigger-position", *timed(c_trigger))
 
     # --- decode regression against golden .sr (optional) ---
     if args.golden_dir:
@@ -428,10 +542,10 @@ def main() -> int:
 
 
 def _finish(rep: Report, info: dict) -> int:
-    p, f, s = rep.counts()
+    p, f, s, k = rep.counts()
     result = "FAIL" if f else "PASS"
     print(f"\n{'='*72}")
-    print(f"PASS {p}   FAIL {f}   SKIP {s}   ->  RESULT: {result}")
+    print(f"PASS {p}   FAIL {f}   SKIP {s}   KNOWN-FW {k}   ->  RESULT: {result}")
     # Provenance + a one-line record to paste into the checklist §4 sign-off table.
     print("\n归档(build/docs/regression-checklist-slogic32u3.md §5):")
     print(f"  日期 {info['date']} | 平台 {info['os']} | 设备 {info['model']} {info['vidpid']} S/N {info['serial']} | "
