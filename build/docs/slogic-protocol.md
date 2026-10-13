@@ -1,7 +1,8 @@
 # SLogic USB protocol: the canonical `libslogic` specification
 
-Status: proposed, 2026-09-17 (revised the same day after a conformance audit of
-both drivers — see section 6 for the drift points the audit surfaced).
+Status: proposed 2026-09-17; revised 2026-10-13 for v2.3.0, when the capture
+engine moved into the core and every front end (libsigrok, all-logic,
+scopehal) became a thin adapter on it (sections 3, 4, 5, 8, 9).
 
 This document is the single source of truth for how the host talks to a Sipeed
 SLogic analyzer over USB — device model, control protocol, and the raw data
@@ -185,113 +186,83 @@ the first word is a random partial (2–6 samples). The driver drops the leading
 sample, so nothing is dropped. Combo8 (a different protocol) also sets 0; only
 SLogic16U3 still sets 4.
 
-### Transfer sizing (drift — section 6.5)
+### Transfer sizing (canonical: section 6.5)
 
-A ring of up to 16 transfers (`NUM_MAX_TRANSFERS`), 32 KiB alignment, expected
-byte rate = `samplerate * channel_count / 8`. The per-transfer *size* differs
-sharply between the two drivers and is **not** yet canonical:
-
-- **libsigrok** probes a 250 ms buffer, aligns to 32 KiB, then quarters it
-  (`>>= 2`) so ≥ 4 stay in flight (~62 ms each). No fixed upper cap — bounded
-  only by whether the probe `malloc` succeeds (~200 MB at 800 MB/s).
-- **all-logic** targets ~4 ms (`rate * 4 / 1000`) clamped to `[32 KiB, 3 MiB]`,
-  with no quartering.
+A ring of up to 16 transfers, 32 KiB alignment, expected byte rate =
+`samplerate * channel_count / 8`. The core probes a 250 ms buffer (halving
+while the OS refuses it, e.g. the Linux usbfs memory limit; capped at the
+WinUSB RAW_IO maximum on Windows), then quarters it, clamped to
+[32 KiB, 64 MiB] and cached per (channels, rate). A finite untriggered
+capture smaller than one transfer uses one transfer of its own size.
 
 ### Stall / completion policy (canonical: section 6.2)
 
 Per completed transfer, with `delta` = time since the previous completion and
 `expected_us = transfer_size * 1e6 / expected_rate_bytes`:
 
-- **Before any bytes arrive** (`raw_received_bytes == 0`): a transfer is "slow"
-  when `delta > 1.3*expected_us` or `actual_rate < 0.7*expected_rate`. After
-  `timeout_count_limit` (= number of submitted transfers) consecutive slow
-  transfers the stream is considered "never started" — re-issue `RUN` once
-  (RUN-swallow recovery), and if it still does not start, abort with an empty
-  capture.
+- **Before any bytes arrive**: a transfer is "slow" when
+  `delta > 1.3*expected_us` or `actual_rate < 0.7*expected_rate`. After
+  ring-size consecutive slow transfers the stream is "never started": the ring
+  is drained and the full start sequence (stop, reset, configure, ring, RUN)
+  is re-issued once; if it still does not start, the capture ends with
+  `error:stall`.
 - **After bytes are flowing:** a slow transfer is only a one-shot warning
-  ("draining at the host's pace") — legitimate USB backpressure when the host
-  is the bottleneck (e.g. 32 ch @ 200 MHz). Only **complete silence** for
-  `SLOGIC_STREAM_IDLE_US = 1_000_000` µs (1 s) is fatal.
-- Any `LIBUSB_TRANSFER_STALL` / `OVERFLOW` / `NO_DEVICE` (or any non-timeout
-  error status) aborts immediately.
-- Completion: once `raw_received_bytes >= samples_need_bytes` (finite capture),
-  clamp the last transfer and stop.
+  ("draining at the host's pace"). Only **complete silence** for
+  `SLOGIC_STREAM_IDLE_US` (1 s) is fatal. The watchdog never declares the
+  capture done (the limit is enforced by the sample accounting, section 8), so
+  idle detection stays armed while waiting for a trigger.
+- `STALL` / `OVERFLOW` / `NO_DEVICE` (or any non-timeout error status) aborts.
+- Completion: the sample accounting delivers exactly `limit` samples
+  (section 8); the ring stops resubmitting once enough raw bytes are in flight.
 
 ---
 
-## 4. Proposed `libslogic` C API
+## 4. `libslogic` C API (`slogic/slogic.h`)
 
-`libslogic` depends only on `libusb.h` and its own headers — **never** on
-`libsigrok.h` or `libsigrok4DSL`'s headers, because the two consumers ship
-different, incompatible generations of those. It is a small vendored source
-folder (`libslogic.c` + `libslogic.h`), copied verbatim into each consumer,
-with a per-consumer adapter doing the framework glue.
+One public header; it includes only `<stdint.h>`/`<stddef.h>` and forward-
+declares the libusb types. Three source groups:
 
-```c
-/* Transport: the host owns libusb; libslogic never opens or claims a device.
- * A mock transport (recorded traces) makes the control path testable without
- * hardware — this is what the conformance vectors drive. */
-typedef struct {
-    void *ctx;
-    int (*control_write)(void *ctx, uint8_t req, uint16_t val, uint16_t idx,
-                         const uint8_t *data, uint16_t len, unsigned timeout_ms);
-    int (*control_read )(void *ctx, uint8_t req, uint16_t val, uint16_t idx,
-                         uint8_t *data, uint16_t len, unsigned timeout_ms);
-} slogic_transport;
+| File | Depends on | Contents |
+|---|---|---|
+| `slogic.c`, `slogic8u2.c`, `slogic16u3.c`, `slogic32u3.c` | — | model registry, channel-mode ceilings, control path (`slogic_reset/configure/run/stop` over a `slogic_transport`), transfer planning, stall watchdog |
+| `slogic_data.c` | — | link-aware rate caps, sample format + unpack, trigger, sample accounting, throughput fit, report line |
+| `slogic_usb.c` | libusb, pthread | device find/open/close, capture engine |
 
-/* Model table (channel↔rate pairs, EPs, ceilings) — read-only, order-free. */
-const slogic_model *slogic_model_for_pid(uint16_t pid);
+**Device.** `slogic_find(ctx, pid, port_path, serial, &dev)` finds an analyzer
+(by port path, then serial — this also re-finds one that re-enumerated with a
+new address). `slogic_dev_open(ctx, dev, log, user, &d)` claims interface 0,
+enables WinUSB RAW_IO where libusb supports it, starts one event thread per
+device and brings the device to a known idle state (stop, drain, reset — also
+after a killed capture). `slogic_dev_close(d)` destroys a live capture first.
 
-typedef struct {
-    int      channel_count;   /* 2/4/8/16/32; adapter maps its mode index here */
-    uint64_t samplerate_hz;
-    double   threshold_v;
-    int      pattern_mode;    /* 0 Normal, 1 USB test, 2 Emulation */
-} slogic_config;
+**Capture.** `slogic_capture_start(d, &cfg, &c)` with
+`slogic_capture_config { slogic_config dev; limit_samples (0 = continuous);
+slogic_trigger_spec trigger; pretrigger_samples; slogic_sink sink;
+max_queue_bytes }`. The host calls `slogic_capture_poll(c, max_buffers,
+wait_ms)` from a thread of its own; samples arrive through
+`sink.data(user, samples, n, unitsize)` and `sink.trigger(user, index)`.
+`slogic_capture_stop(c)` (any thread) requests the end; poll returns
+`SLOGIC_CAP_DONE` once the ring is idle, the device stopped and the report
+logged. `slogic_capture_report()` fills a `slogic_report`;
+`slogic_capture_destroy()` frees it (and leaks rather than frees if the ring
+never drains).
 
-/* Control path (issues the register/AUX transactions of sections 2/2b). */
-int slogic_reset    (slogic_dev *, const slogic_transport *);
-int slogic_configure(slogic_dev *, const slogic_transport *, const slogic_config *);
-int slogic_run      (slogic_dev *, const slogic_transport *);
-int slogic_stop     (slogic_dev *, const slogic_transport *);
-
-/* Transfer planning (section 3): size, count, per-transfer timeout, expected rate. */
-typedef struct { uint32_t size; int count; uint64_t expected_rate_bytes;
-                 unsigned timeout_ms; } slogic_transfer_plan;
-int slogic_plan_transfers(const slogic_config *, slogic_transfer_plan *out);
-
-/* Per-transfer shared post-processing. The adapter owns the libusb ring and
- * calls these; the raw (buf,len) it hands back is still sample-major — the
- * adapter shapes it. */
-size_t slogic_apply_first_drop(slogic_stream *, uint8_t *buf, size_t len);
-
-typedef enum { SLOGIC_STREAM_OK, SLOGIC_STREAM_WARN_SLOW,
-               SLOGIC_STREAM_RETRY_RUN, SLOGIC_STREAM_ABORT } slogic_verdict;
-slogic_verdict slogic_stream_watch(slogic_stream *, size_t got_bytes,
-                                   int64_t now_us);
-```
-
-The adapter keeps everything framework-shaped: session/event-loop integration,
-the config-key mapping (`SR_CONF_*` differs between the two libsigrok
-generations), channel enable/disable, soft trigger (libsigrok only), and the
-data reshape into `SR_DF_LOGIC` or `LA_CROSS_DATA`.
+**Rates.** `slogic_link_max_rate(m, nch, link)` (native ceiling, U3 capped at
+`320 MHz / nch` on a known link slower than USB 3), `slogic_pick_rate(...,
+exact)` (exact match or nearest), `slogic_rate_list(...)`.
 
 ---
 
-## 5. What stays in the adapter (explicitly out of scope for `libslogic`)
+## 5. What stays in the adapter
 
-- **Data reshaping.** libsigrok: sample-major → `SR_DF_LOGIC`, expanding
-  sub-byte modes so each sample occupies one byte. all-logic: bit-transpose to
-  `LA_CROSS_DATA` 64-sample channel planes with a worker pool. Two data models;
-  they do not merge.
-- **Event loop.** libsigrok registers an `sr_session` source keyed off the
-  libusb context; all-logic runs its own collect thread + `receive_data`.
-- **Config surface.** `SR_CONF_NUM_LOGIC_CHANNELS` (count) vs
-  `SR_CONF_CHANNEL_MODE` (mode index); different enum values across the two
-  generations.
-- **Soft trigger.** libsigrok has a driver-side `soft_trigger_logic`; all-logic
-  has none. Trigger stays adapter-side.
-- **Device discovery / claim / string descriptors / speed detection.**
+Only the host's own surface: device scan and naming, config-key mapping
+(libsigrok `SR_CONF_*`, DSView channel-mode indices, scopehal channel model),
+data shaping for the host (libsigrok `SR_DF_LOGIC`; all-logic `LA_CROSS_DATA`
+transpose and 1T filter; scopehal waveform reshape and analog-group
+triggers), the host's event/session integration (who calls
+`slogic_capture_poll`), and the host's hotplug framework. Device behaviour —
+start/stop sequencing, the ring, stall recovery, sample limits, trigger,
+throughput measurement, reconnect lookup — belongs in the core.
 
 ---
 
@@ -336,14 +307,13 @@ libsigrok's old inline `first_here` drop is gone.
 
 libsigrok retries 6, all-logic 8. **Canonical:** 8 (harmless headroom).
 
-### 6.5 Transfer sizing — OPEN (settle against the Phase 0 baseline)
+### 6.5 Transfer sizing — RESOLVED toward the libsigrok probe
 
-The two drivers size transfers by incompatible strategies (section 3):
-libsigrok's 250 ms-probe-then-quarter (~62 ms, no upper cap) versus all-logic's
-~4 ms target clamped to `[32 KiB, 3 MiB]`. Both keep ≤ 16 in flight. This is a
-throughput knob (Phase 1 territory), so `libslogic` does not pre-pick a winner:
-it exposes the sizing as a parameter and the choice is measured against
-`slogic-capture-baseline.md` before it is frozen.
+The libsigrok probe strategy (section 3) is the one proven at full rate on all
+three OSes (Windows RAW_IO in 2.1, macOS ~50 MB transfers). With throughput
+now measured by a fit over completions (section 9), transfer size no longer
+biases the reported rate, so the latency argument for ~4 ms transfers is gone.
+`SLOGIC_SIZING_ALLLOGIC` remains for experiments.
 
 ### 6.6 VTH→DAC rounding — RESOLVED toward round
 
@@ -365,14 +335,13 @@ with a read-back, then `CTRL=RUN`. libsigrok's vref confirm compares the
 read-back against a hard-coded `1024` (`api.c:1154`) and so always logs a false
 "Failed to configure vref"; the canonical compares against the value written.
 
-### 6.8 Samplerate resolution and the USB2 cap
+### 6.8 Samplerate resolution and the USB2 cap — RESOLVED, in the core
 
-Requested-rate resolution differs (all-logic snaps to nearest ≤ ceiling;
-libsigrok requires an exact hit or wraps to the ceiling) and stays adapter-side
-(config surface, section 5). all-logic's runtime `320 MHz / nch` cap for U3
-links below USB 3.0, and the Windows ceiling notch, likewise stay host-side: the
-core programs whatever samplerate it is handed and never caps. A front end that
-wants those limits keeps them in its own config surface.
+The USB2 cap (`320 MHz / nch` for U3 models on a known link below USB 3) moved
+from all-logic into the core (`slogic_link_max_rate`), so every front end
+lists and enforces the same rates. Resolution style stays a host choice:
+libsigrok asks for an exact match (`exact=1`, else wraps to the ceiling with a
+warning), all-logic for the nearest rate (`exact=0`).
 
 ---
 
@@ -401,3 +370,59 @@ freeze this spec → these vectors are the baseline → extract `libslogic` to
 satisfy them → port the libsigrok adapter first (release-pinned; it stays within
 the documented ±1 DAC and AUX-ordering tolerances) → port the all-logic adapter
 → then land Phase 1 buffer-pooling once, in the core.
+
+---
+
+## 8. Capture engine (`slogic_usb.c`)
+
+**Threads.** One libusb event thread per open device pumps the context (a host
+may pump the same context too, e.g. all-logic's hotplug thread; libusb runs
+completions one at a time). The transfer callback only touches atomics and the
+mutex-protected queue; every control transfer runs on the host's poll thread.
+
+**Start.** stop → reset → clear halt (host data toggle) → configure → size the
+transfers → submit the ring → RUN.
+
+**Callback.** Swap in a fresh buffer, resubmit, then enqueue the filled one (the
+bulk pipe never idles on host work). No resubmit once the capture is aborted or
+enough raw bytes are in flight for a finite untriggered capture. A transfer
+leaves the in-flight count as the callback's last action, under the queue
+lock — once poll sees zero no callback can touch the ring or the capture.
+
+**Accounting (`slogic_acc`, `slogic_data.c`).** First-word drop (per-model
+quirk), then either the untriggered path or the trigger path, delivering
+**exactly** `limit` samples (`limit = 0`: until stopped). Below 8 channels the
+wire packs 8/nch samples per byte (earliest in the low bits); the core
+delivers one byte per sample, handling a partial last group. Wire bytes for n
+samples are `ceil(n * nch / 8)`.
+
+**Trigger.** Single stage, per channel 0/1/rising/falling/either edge, ANDed.
+Scanned on packed data with a 64-bit change prefilter; the previous sample is
+carried across buffers. It arms only once the pre-trigger ring has filled, so a
+fired trigger is always at index `pretrigger` of the delivered stream. Stop
+before the trigger delivers nothing (`end=notrig`).
+
+**Teardown.** STOP is sent first (retried up to 10 times), while the ring still
+drains the device; then the ring is cancelled and, once idle, freed. Cancelling
+first leaves current firmware streaming into an endpoint nobody reads (see the
+firmware note F3). Destroy waits up to 2 s for the ring and otherwise leaks it.
+
+## 9. Measurement standard
+
+Throughput is the least-squares slope of cumulative bytes against transfer
+completion time, over every data-bearing completion (Welford, online). It does
+not depend on transfer size (the old `bytes / (now - first completion)` counted
+the first transfer's bytes without its time: +14% on macOS) and needs at least
+two completions; the self-test requires 3. Cold start is where the fitted line
+reaches zero bytes, minus the RUN time.
+
+Every host logs one line at the end of each capture:
+
+```text
+slogic-report v1 model=SLogic32U3 ch=32 rate_mhz=200 end=ok samples=100000000/100000000 bytes=401604608 mbps=800.6 exp_mbps=800.0 fit_n=129 span_ms=496.5 cold_ms=0.9 xfer=3112960x5 rearms=0 trig=none q_peak_mb=3.1
+```
+
+`end` is `ok | stopped | notrig | error:<reason>`; `mbps`/`cold_ms` are `nan`
+with fewer than two points; `trig=at:<index>,pre:<n>` when a trigger fired.
+`build/bench/slogic_selftest.py` and `capture_bench.py` parse this line.
+

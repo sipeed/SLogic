@@ -4,6 +4,63 @@ All notable changes to the SLogic all-in-one build (PulseView + SLogicView +
 sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
 `release-X.Y.Z` tags; each platform archive is `SLogic-X.Y.Z-<platform>.zip`.
 
+## v2.3.0 — unreleased
+
+### Highlights
+
+- **One capture engine for every app.** The transfer ring, stall recovery,
+  sample accounting, trigger and throughput measurement now live once in the
+  shared libslogic core; sigrok-cli/PulseView/SLogicView, AllLogic and
+  ngscopeclient are thin adapters on it, so a fix there reaches all of them.
+- **Exact sample counts.** A capture delivers exactly the requested number of
+  samples in every channel mode. 4-channel captures whose size was not
+  word-aligned crashed sigrok-cli (e.g. 1002 samples) and odd counts came back
+  one sample short; both are fixed.
+- **Continuous capture works** (`sigrok-cli --continuous`, AllLogic loop mode).
+- **Correct throughput.** The rate is now a least-squares fit over transfer
+  completions, printed by every app as one `slogic-report v1` line with the
+  cold start reported separately. It no longer depends on transfer size (2.2.0
+  read up to +14% high on macOS, +0.6% on Linux).
+- **Trigger at full speed, exactly placed.** The trigger runs on packed data
+  and keeps up at 4ch@1400 MHz; it lands exactly at the capture-ratio position
+  (default 10%, now settable as `captureratio`). Stopping while waiting for a
+  trigger returns at once.
+- **More robust stop and reconnect.** STOP is sent (and retried) before the
+  transfers are cancelled on every path, which avoids current firmware
+  dropping off the bus after a capture; a re-enumerated analyzer is found
+  again by port/serial.
+
+### Fixed
+
+- SLogicView: no crash when a capture fails to start, no hang on rapid
+  Run/Stop, automatic reconnect + retry after the analyzer re-enumerates,
+  STOP no longer hangs while waiting for a trigger, a 1.4 GHz triggered SPI
+  capture no longer runs for seconds past its length.
+- ngscopeclient: 4-channel captures showed wrong data at half the timebase.
+- AllLogic: 4-channel captures convert ~3.8× faster; the stall re-arm restarts
+  the stream cleanly; the "stream done" rate/cold-start log was wrong.
+
+### Changed
+
+- SLogicView: 14 px UI text and larger panel buttons; adding a decoder opens
+  the Protocol Decoders panel; device options resync after reconnect/start.
+- The USB2 samplerate cap (320 MHz / channels on a USB 2 link) now applies in
+  sigrok-cli, PulseView and SLogicView too.
+- Multi-stage triggers are rejected (the SLogic trigger is single-stage).
+- The per-transfer `Got … speed:` debug lines are replaced by the
+  `slogic-report v1` line.
+- AllLogic does not trigger yet (captures untriggered, as before).
+
+### Internal
+
+- Regression self-test: exact-count, Emulation-head (firmware F1 reported as
+  KNOWN-FW), continuous and trigger-position checks; bundled synthetic
+  UART/SPI/I2C golden decode fixtures; macOS uses 1.5 s captures.
+- `capture_bench.py`: parses the new report line; the MCP samplerate is now
+  actually applied (every mode used to run at 200 MHz).
+- libslogic unit tests (unpack, trigger, accounting, rate fit) and a hardware
+  test tool (`slogic/tools/slogic_hwtest.c`).
+
 ## v2.2.0 — 2026-10-13
 
 ### Highlights
