@@ -1,0 +1,1 @@
+-P spi:clk=D0:mosi=D1:miso=D2:cs=D3 -A spi=mosi-data

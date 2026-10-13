@@ -250,6 +250,8 @@ def main() -> int:
     args = ap.parse_args()
     if args.duration_ms is None:
         args.duration_ms = 1500 if sys.platform == "darwin" else DURATION_MS
+    if args.golden_dir is None and (Path(__file__).resolve().parent / "golden").is_dir():
+        args.golden_dir = str(Path(__file__).resolve().parent / "golden")  # bundled fixtures
 
     cli = resolve_cli(args.sigrok_cli)
     env = cli_env(cli)

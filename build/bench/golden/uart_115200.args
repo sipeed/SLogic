@@ -1,0 +1,1 @@
+-P uart:rx=D0:baudrate=115200 -A uart=rx-data

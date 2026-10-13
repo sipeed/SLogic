@@ -1,0 +1,5 @@
+i2c-1: Write
+i2c-1: Address write: 50
+i2c-1: Data write: A5
+i2c-1: Data write: 5A
+i2c-1: Data write: 3C

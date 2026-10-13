@@ -1,0 +1,1 @@
+-P i2c:scl=D0:sda=D1 -A i2c=address-write:data-write
