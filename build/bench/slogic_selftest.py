@@ -54,8 +54,9 @@ VENDOR_ID = "359f"
 # Per-model channel-mode -> max sample rate (MHz) and aggregate standard (MB/s) at the model's
 # native USB link (aggregate = channels * MHz / 8; source slogic/slogic*.c). 32U3 is USB 10G
 # (~800 MB/s; 4ch@1400 = 700), 16U3 is USB 5G (~400 MB/s). A 10G-native model negotiated down to a
-# 5G link halves both rates and standard. "clamp" is an over-limit config (rate above the channel
-# mode's max) the driver must clamp + warn about.
+# 5G link is capped by the 5G aggregate (half the standard): each mode runs at
+# min(native max, aggregate*8/ch) — e.g. 32U3 on 5G: 4ch@800 8ch@400 16ch@200 32ch@100.
+# "clamp" is an over-limit config (rate above the channel mode's max) the driver must clamp + warn about.
 MODELS = {
     "SLogic32U3": {"modes": [(4, 1400), (8, 800), (16, 400), (32, 200)], "std": 800,
                    "native": "10G", "clamp": "logic_channels=32:samplerate=1400m"},
@@ -304,8 +305,9 @@ def main() -> int:
         else:
             link, src = spec["native"], "native"
     if spec["native"] == "10G" and link == "5G":
-        modes = [(ch, mhz // 2) for ch, mhz in spec["modes"]]
         std = spec["std"] // 2
+        # 5G caps the aggregate, not each rate: 4ch keeps a higher rate than a plain halving
+        modes = [(ch, min(mhz, std * 8 // ch)) for ch, mhz in spec["modes"]]
         link_desc = "5G (10G link degraded)"
     else:
         modes = spec["modes"]
