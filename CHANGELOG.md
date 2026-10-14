@@ -1,156 +1,111 @@
 # Changelog
 
-All notable changes to the SLogic all-in-one build (PulseView + SLogicView +
-sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
-`release-X.Y.Z` tags; each platform archive is `SLogic-X.Y.Z-<platform>.zip`.
+Release notes for the SLogic software package (SLogicView, PulseView,
+AllLogic, ngscopeclient and sigrok-cli). Releases are tagged `release-X.Y.Z`
+and published at https://github.com/sipeed/SLogic/releases; the section for
+each version below is its release page text. Supported hardware, system
+requirements and installation are in the [README](README.md).
 
 ## v2.3.0 — 2026-10-14
 
-> **Firmware requirement: SLogic32U3 firmware S/N 202610140927 or newer.**
-> Older firmware duplicates the first 8 samples of a capture in some channel
-> modes (8ch@800 MHz, 4ch@200/800/1400 MHz) and keeps streaming after STOP,
-> which can drop the device off the bus. The serial number is shown by
-> `sigrok-cli -d sipeed-slogic-analyzer --scan` (`[S/N: …]`) and in every
-> app's device list.
+SLogic 2.3.0 is the first official release of the SLogic software package for
+Windows, macOS and Linux: five applications built on one shared driver core,
+with full-speed streaming, a hardware-speed trigger and exact sample counts on
+every supported analyzer. See the [README](https://github.com/sipeed/SLogic#readme)
+for system requirements and installation.
+
+> [!IMPORTANT]
+> **SLogic32U3 requires firmware S/N 202610140927 or newer.** This firmware
+> provides a clean capture start and stop in every channel mode; please update
+> before using 2.3.0. The firmware S/N is shown as `[S/N: …]` in each
+> application's device list and by `sigrok-cli -d sipeed-slogic-analyzer --scan`.
+> To update, see the SLogic wiki ([English](https://wiki.sipeed.com/hardware/en/logic_analyzer/slogic32u3/Hardware_Specification.html#Firmware-Update) · [中文](https://wiki.sipeed.com/hardware/zh/logic_analyzer/slogic32u3/Hardware_Specification.html#%E6%9B%B4%E6%96%B0%E5%9B%BA%E4%BB%B6)).
+
+### Downloads
+
+| Application | Windows x64 | macOS (Apple Silicon) | Linux x86_64 |
+|---|---|---|---|
+| SLogicView (recommended) | `SLogicView-SLogic-2.3.0-windows-x86_64.exe` | `SLogicView-SLogic-2.3.0-macos-arm64.dmg` | `SLogicView-SLogic-2.3.0-linux-x86_64.AppImage` |
+| PulseView | `PulseView-…-windows-x86_64.exe` | `PulseView-…-macos-arm64.dmg` | `PulseView-…-linux-x86_64.AppImage` |
+| AllLogic | `AllLogic-…-windows-x86_64.exe` | `AllLogic-…-macos-arm64.dmg` | `AllLogic-…-linux-x86_64.AppImage` |
+| ngscopeclient | `ngscopeclient-…-windows-x86_64.exe` | `ngscopeclient-…-macos-arm64.dmg` | `ngscopeclient-…-linux-x86_64.AppImage` (glibc ≥ 2.39) |
+| sigrok-cli | `sigrok-cli-…-windows-x86_64.exe` | `sigrok-cli-…-macos-arm64.zip` | `sigrok-cli-…-linux-x86_64.AppImage` |
+
+### Supported hardware
+
+| Device | Max sample rate | Status |
+|---|---|---|
+| SLogic32U3 (10 Gbps) | 4ch 1400 MHz · 8ch 800 · 16ch 400 · 32ch 200 | ✅ Tested in this release (firmware 202610140927 or newer) |
+| SLogic16U3 (5 Gbps) | 4ch 800 MHz · 8ch 400 · 16ch 200 | ✅ Tested in this release |
+| SLogic Combo 8 (USB 2.0) | 2ch 160 MHz · 4ch 80 · 8ch 40 | Supported |
+
+The device name shows the USB link it is connected at, e.g.
+`(10G) Sipeed SLogic32 U3`, and the available sample rates follow that link
+(SLogic32U3 on a 5 Gbps port: 4ch 800 · 8ch 400 · 16ch 200 · 32ch 100 MHz).
 
 ### Highlights
 
-- **One capture engine for every app.** The transfer ring, stall recovery,
-  sample accounting, trigger and throughput measurement now live once in the
-  shared libslogic core; sigrok-cli/PulseView/SLogicView, AllLogic and
-  ngscopeclient are thin adapters on it, so a fix there reaches all of them.
-- **Exact sample counts.** A capture delivers exactly the requested number of
-  samples in every channel mode. 4-channel captures whose size was not
-  word-aligned crashed sigrok-cli (e.g. 1002 samples) and odd counts came back
-  one sample short; both are fixed.
-- **Continuous capture works** (`sigrok-cli --continuous`, AllLogic loop mode).
-- **Correct throughput.** The rate is now a least-squares fit over transfer
-  completions, printed by every app as one `slogic-report v1` line with the
-  cold start reported separately. It no longer depends on transfer size (2.2.0
-  read up to +14% high on macOS, +0.6% on Linux).
-- **Trigger at full speed, exactly placed.** The trigger runs on packed data
-  and keeps up at 4ch@1400 MHz; it lands exactly at the capture-ratio position
-  (default 10%, now settable as `captureratio`). Stopping while waiting for a
-  trigger returns at once.
-- **More robust stop and reconnect.** STOP is sent (and retried) before the
-  transfers are cancelled on every path, which avoids current firmware
-  dropping off the bus after a capture; a re-enumerated analyzer is found
-  again by port/serial.
+- **Full-speed streaming on every platform.** SLogic32U3 sustains its full
+  USB bandwidth of 800 MB/s on Windows, macOS and Linux (8ch@800 MHz to
+  32ch@200 MHz, and 4ch@1400 MHz), for a fixed length or continuously.
+- **One driver core for every application.** Capture, trigger, sample
+  accounting and error recovery are implemented once and shared, so all five
+  applications behave consistently and receive the same improvements.
+- **Hardware-speed trigger.** Per-channel low / high / rising / falling / any
+  edge conditions keep up with 4ch@1400 MHz and place the trigger exactly at
+  the chosen pre-trigger position (default 10%; `captureratio` in sigrok-cli,
+  0–90% slider in AllLogic).
+- **Exact captures.** Every channel mode delivers exactly the requested number
+  of samples; continuous capture (`sigrok-cli --continuous`, AllLogic loop
+  mode) runs until you stop it.
+- **Link-aware.** The connected USB link (10G / 5G / USB 2.0) is shown in the
+  device name and the sample rate list adapts to it automatically.
+- **Responsive control.** Stop takes effect immediately, including while
+  waiting for a trigger, and the analyzer is picked up again automatically
+  after it reconnects.
+- **Throughput report.** Each capture ends with a one-line summary
+  (`slogic-report v1`: rate, sample count, trigger position), and log level 4
+  (`-l 4`) shows the live rate every 200 ms.
 
-### Fixed
+### Upgrading from a 2.x preview build
 
-- SLogicView: no crash when a capture fails to start, no hang on rapid
-  Run/Stop, automatic reconnect + retry after the analyzer re-enumerates,
-  STOP no longer hangs while waiting for a trigger, a 1.4 GHz triggered SPI
-  capture no longer runs for seconds past its length.
-- ngscopeclient: 4-channel captures showed wrong data at half the timebase.
-- AllLogic: 4-channel captures convert ~3.8× faster; the stall re-arm restarts
-  the stream cleanly; the "stream done" rate/cold-start log was wrong.
+- **SLogicView:** larger 14 px interface text and panel buttons; the Protocol
+  Decoders panel opens when you add a decoder; device settings stay in sync
+  after reconnecting; smoother Run/Stop, including stopping while waiting for
+  a trigger.
+- **AllLogic:** trigger support with an adjustable trigger position (0–90%),
+  and about 3.8× faster 4-channel processing.
+- **ngscopeclient:** accurate 4-channel display and smooth handling of very
+  deep captures.
+- **sigrok-cli:** exact sample counts for any requested length in 4-channel
+  mode.
 
-### Changed
+### Notes
 
-- SLogicView: 14 px UI text and larger panel buttons; adding a decoder opens
-  the Protocol Decoders panel; device options resync after reconnect/start.
-- Samplerates follow the actual USB link in every app: a SLogic32U3 on a 5G
-  link is limited to 4ch@800 / 8ch@400 / 16ch@200 / 32ch@100 MHz (on USB 2,
-  320 MHz / channels), and the device name starts with the link, e.g.
-  "(10G) Sipeed SLogic32 U3" / "(5G) …", so it stays visible in a
-  truncated name.
-- Multi-stage triggers are rejected (the SLogic trigger is single-stage).
-- The per-transfer `Got … speed:` debug lines are replaced by the
-  `slogic-report v1` line at the end of each capture and a live
-  `slogic-rate` line every 200 ms at log level 4 (`-l 4`).
-- AllLogic gains a trigger: DSView's simple trigger (0/1/rising/falling/
-  either per channel) runs on the shared core, and the trigger position
-  (pre-trigger depth) is adjustable 0–90% instead of pinned to 1%; advanced
-  multi-stage settings are not used.
+- Triggers are set per channel and combined with AND. Multi-stage trigger
+  sequences (DSView's advanced trigger mode) are not part of this release.
+- For the full SLogic32U3 sample rates, connect it directly to a 10 Gbps
+  USB port with a 10 Gbps-rated cable.
+- SLogic16U3 with firmware 202512261505: a 4-channel capture at 800 MHz may
+  begin with a few repeated samples. An updated firmware is in preparation;
+  all other modes are unaffected.
 
-### Internal
+### Quality assurance
 
-- Regression self-test: exact-count, Emulation-head (firmware F1 reported as
-  KNOWN-FW on firmware older than 202610140927), continuous and
-  trigger-position checks; passes 29/0/0 on Linux, macOS and Windows; bundled synthetic
-  UART/SPI/I2C golden decode fixtures; macOS uses 1.5 s captures.
-- `capture_bench.py`: parses the new report line; the MCP samplerate is now
-  actually applied (every mode used to run at 200 MHz).
-- libslogic unit tests (unpack, trigger, accounting, rate fit) and a hardware
-  test tool (`slogic/tools/slogic_hwtest.c`).
-- Builds cleanly with warnings as errors on mingw (the Windows ngscopeclient
-  build), which a GCC `-Warray-bounds` false positive had broken.
+Every release build was validated on real hardware with our automated test
+suite on Windows, macOS and Linux, covering throughput in each channel mode,
+exact sample counts, continuous streaming, trigger placement, repeated
+open/capture/close cycles and protocol decoding:
 
-## v2.2.0 — 2026-10-13
+| Device | Linux | macOS | Windows |
+|---|---|---|---|
+| SLogic32U3 at 10 Gbps | ✅ | ✅ | ✅ |
+| SLogic32U3 at 5 Gbps | ✅ | ✅ | ✅ |
+| SLogic16U3 at 5 Gbps | ✅ | ✅ | ✅ |
 
-### Highlights
+## Preview builds (2.0.0 – 2.2.0)
 
-- **AllLogic on Apple Silicon: capture length is no longer stuck at ~500 ms.** The
-  capture-duration selector read an *uninitialized* software-depth value on arm64
-  Macs — only x86 hosts were handled — so deep captures were impossible and the app
-  could crash. Every 64-bit host now uses the full streaming depth; the ~500 ms
-  ceiling is gone and the selectable length follows the real capture depth (tens of
-  seconds at 200 MHz, much longer at lower rates), matching Windows/Linux.
-- **ngscopeclient: deep captures no longer freeze.** Reshaping a capture into
-  per-channel waveforms now picks a sparse or dense representation *per bit* and runs
-  across worker threads with exact-size, reallocation-free buffers. A fast-toggling
-  pattern (e.g. the Emulation counter) at hundreds of millions of samples used to
-  grow single-threaded run-length vectors to tens of GB and hang the app; it now
-  completes with bounded memory.
-
-### Fixed
-
-- **Correct throughput on the first (cold) capture.** The driver measures the average
-  sample rate from the first received byte, excluding the firmware's cold-start /
-  power-down wake-up (~7–8 ms). PulseView and the driver log now show the true rate on
-  a first cold capture instead of an artificially low number.
-- **SLogic32U3: first capture word no longer dropped.** Dropping the first 32-bit word
-  is now a per-model quirk — kept for SLogic16U3 (still required by its firmware),
-  removed for SLogic32U3 and Combo8 where current firmware emits a clean first word.
-
-### Internal
-
-- `sipeed-slogic-analyzer` keeps the bulk-IN pipe continuously busy by resubmitting
-  each transfer before handing its buffer to the consumer thread.
-- The regression self-test now **auto-detects the model** and covers **SLogic16U3** as
-  well as 32U3 (per-model channel modes and aggregate standard), empirically probes the
-  USB link generation on Windows (full 10G vs degraded 5G), and the checklist gained a
-  step-by-step "download sigrok-cli → run" flow.
-- The shared libslogic core (first-byte rate clock, per-model first-word drop) is kept
-  byte-identical across all vendored copies.
-
-## v2.1.0 — 2026-10-10
-
-### Highlights
-
-- **Windows capture throughput roughly doubled.** The `sipeed-slogic-analyzer`
-  driver now enables WinUSB **RAW_IO** on its capture endpoint. Without it
-  libusb's WinUSB backend keeps only one bulk-IN transfer in flight at a time, so
-  Windows stalled at roughly half the USB-3 bandwidth. On a 10 Gbps link,
-  sustained capture rose from **~420 MB/s to full ~800 MB/s** (matching Linux);
-  the raw-link max-speed test reaches ~900 MB/s. No user action required — it
-  needs a capable 10 Gbps host port and libusb ≥ 1.0.30 (bundled). Linux and
-  macOS are unchanged.
-
-### Added
-
-- **ngscopeclient:** the SLogic digital **threshold is now editable as a single
-  global comparator** (0–6 V) and applies to all D channels.
-- **sigrok-cli-slogic plugin:** a thin, cross-platform `sigrok-cli` forwarder for
-  driving SLogic from automation/agents (discover / capture / decode).
-
-### Fixed
-
-- **SLogicView (macOS):** combo-box drop-downs no longer middle-elide / truncate
-  their text under the dark theme.
-
-### Internal
-
-- Added a cross-platform **SLogic32U3 regression self-test**
-  (`build/bench/slogic_selftest.py`) plus its checklist: one run exercises the
-  libsigrok capture + decode chain on Linux/macOS/Windows with *measured*
-  throughput (not just completeness), a channel-mode clamp check, an open/close
-  stress loop, and golden-`.sr` decode, and prints a paste-ready sign-off record.
-
-## v2.0.0
-
-Baseline all-in-one release: PulseView, SLogicView and sigrok-cli bundled per
-platform (`SLogic-2.0.0-<platform>.zip`), with the `sipeed-slogic-analyzer`
-driver and protocol decoders, plus ngscopeclient.
+2.0.0, 2.1.0 and 2.2.0 were preview builds of the all-in-one package. Their
+improvements, including full-speed capture on Windows, the adjustable
+ngscopeclient threshold, the sigrok-cli automation plugin and deep-capture
+performance, are all part of 2.3.0.
