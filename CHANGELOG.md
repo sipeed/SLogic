@@ -75,6 +75,8 @@ sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
   actually applied (every mode used to run at 200 MHz).
 - libslogic unit tests (unpack, trigger, accounting, rate fit) and a hardware
   test tool (`slogic/tools/slogic_hwtest.c`).
+- Builds cleanly with warnings as errors on mingw (the Windows ngscopeclient
+  build), which a GCC `-Warray-bounds` false positive had broken.
 
 ## v2.2.0 — 2026-10-13
 
