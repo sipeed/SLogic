@@ -4,7 +4,9 @@ Release notes for the SLogic software package (SLogicView, PulseView,
 AllLogic, ngscopeclient and sigrok-cli). Releases are tagged `release-X.Y.Z`
 and published at https://github.com/sipeed/SLogic/releases; the section for
 each version below is its release page text. Supported hardware, system
-requirements and installation are in the [README](README.md).
+requirements and installation are in the [README](README.md). A Chinese
+translation of each section is kept in [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
+and appended to the release page.
 
 ## v2.3.0 — 2026-10-14
 

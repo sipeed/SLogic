@@ -1,0 +1,31 @@
+#!/bin/sh
+# Print the GitHub release body for version X.Y.Z: the "## vX.Y.Z" section of
+# CHANGELOG.md, then the same section of CHANGELOG.zh-CN.md when it has one.
+# Used by the release job in .github/workflows/build.yml; run it locally to
+# preview or to refresh a published release with `gh release edit --notes-file`.
+set -eu
+
+ver=${1:?usage: release-notes X.Y.Z}
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+section() {
+    [ -f "$1" ] || return 0
+    awk -v h="## v$ver" '
+        index($0, h) == 1 && ($0 == h || substr($0, length(h) + 1, 1) == " ") { f = 1; next }
+        f && /^## / { exit }
+        f' "$1" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
+}
+
+en=$(section "$root/CHANGELOG.md")
+zh=$(section "$root/CHANGELOG.zh-CN.md")
+
+if [ -z "$en" ]; then
+    echo "::warning::CHANGELOG.md has no section for v$ver" >&2
+    exit 0
+fi
+
+if [ -n "$zh" ]; then
+    printf '*中文说明见下文。Chinese version below.*\n\n%s\n\n---\n\n## 中文说明\n\n%s\n' "$en" "$zh"
+else
+    printf '%s\n' "$en"
+fi
