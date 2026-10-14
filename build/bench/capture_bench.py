@@ -52,7 +52,13 @@ MCP_CHANNEL_MODE_INDEX = {32: 0, 16: 1, 8: 2, 4: 3}
 # The libsigrok driver streams sample-major bytes; below 8 channels it
 # expands each sample to one byte.
 def unitsize(channels):
+    """Bytes per delivered sample (sigrok-cli output, 1 below 8 channels)."""
     return max(1, channels // 8)
+
+
+def wire_bytes(channels, samples):
+    """Bytes on the USB wire (below 8 channels, 8/channels samples per byte)."""
+    return (samples * channels + 7) // 8
 
 
 @dataclasses.dataclass
@@ -258,7 +264,7 @@ class McpTransport(Transport):
             "p95_ms": 1000 * latencies[int(len(latencies) * 0.95)],
             "max_ms": 1000 * latencies[-1],
         } if latencies else None
-        captured_bytes = captured * unitsize(cell.channels)
+        captured_bytes = wire_bytes(cell.channels, captured)
         chunk = self._log_since(log_at)
         driver = self._driver_report(chunk)
         if driver:
@@ -368,7 +374,7 @@ class SigrokCliTransport(Transport):
             stream_s=stream,
             host_tail_s=max(t_exit - (t_last or t_exit), 0.0),
             process_cpu_s=cpu,
-            wire_rate_mbps=total / stream / 1e6,
+            wire_rate_mbps=wire_bytes(cell.channels, total // unitsize(cell.channels)) / stream / 1e6,
             backpressure=None,
             gui_latency_ms=None,
             notes=notes,
