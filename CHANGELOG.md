@@ -44,8 +44,11 @@ sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
 
 - SLogicView: 14 px UI text and larger panel buttons; adding a decoder opens
   the Protocol Decoders panel; device options resync after reconnect/start.
-- The USB2 samplerate cap (320 MHz / channels on a USB 2 link) now applies in
-  sigrok-cli, PulseView and SLogicView too.
+- Samplerates follow the actual USB link in every app: a SLogic32U3 on a 5G
+  link is limited to 4ch@800 / 8ch@400 / 16ch@200 / 32ch@100 MHz (on USB 2,
+  320 MHz / channels), and the device name starts with the link, e.g.
+  "(10G) Sipeed SLogic32 U3" / "(5G) …", so it stays visible in a
+  truncated name.
 - Multi-stage triggers are rejected (the SLogic trigger is single-stage).
 - The per-transfer `Got … speed:` debug lines are replaced by the
   `slogic-report v1` line.

@@ -404,14 +404,29 @@ static void test_link_caps(void)
 	CHECK(slogic_link_max_rate(m32, 4, SLOGIC_LINK_HIGH) == SLOGIC_MHZ(80));
 	CHECK(slogic_link_max_rate(m32, 32, SLOGIC_LINK_HIGH) == SLOGIC_MHZ(10));
 	CHECK(slogic_link_max_rate(c8, 8, SLOGIC_LINK_HIGH) == SLOGIC_MHZ(40));
-	CHECK(slogic_pick_rate(m32, 4, SLOGIC_LINK_SUPER, SLOGIC_MHZ(1400), 1) == SLOGIC_MHZ(1400));
+	/* 32U3 on a 5G link: the 400 MB/s aggregate caps each mode. */
+	CHECK(slogic_link_max_rate(m32, 4, SLOGIC_LINK_SUPER) == SLOGIC_MHZ(800));
+	CHECK(slogic_link_max_rate(m32, 8, SLOGIC_LINK_SUPER) == SLOGIC_MHZ(400));
+	CHECK(slogic_link_max_rate(m32, 16, SLOGIC_LINK_SUPER) == SLOGIC_MHZ(200));
+	CHECK(slogic_link_max_rate(m32, 32, SLOGIC_LINK_SUPER) == SLOGIC_MHZ(100));
+	CHECK(slogic_link_max_rate(m32, 4, SLOGIC_LINK_SUPER_PLUS) == SLOGIC_MHZ(1400));
+	/* 16U3 is a 5G device: its native table already fits. */
+	CHECK(slogic_link_max_rate(slogic_model_for_pid(SLOGIC_PID_16U3), 4,
+				   SLOGIC_LINK_SUPER) == SLOGIC_MHZ(800));
+	CHECK(slogic_pick_rate(m32, 4, SLOGIC_LINK_SUPER, SLOGIC_MHZ(1400), 1) == 0);
+	CHECK(!strcmp(slogic_link_tag(SLOGIC_LINK_SUPER_PLUS), "10G") &&
+	      !strcmp(slogic_link_tag(SLOGIC_LINK_SUPER), "5G") &&
+	      slogic_link_tag(SLOGIC_LINK_UNKNOWN) == NULL);
+	CHECK(slogic_pick_rate(m32, 4, SLOGIC_LINK_SUPER_PLUS, SLOGIC_MHZ(1400), 1) == SLOGIC_MHZ(1400));
 	CHECK(slogic_pick_rate(m32, 4, SLOGIC_LINK_HIGH, SLOGIC_MHZ(1400), 1) == 0);
 	CHECK(slogic_pick_rate(m32, 4, SLOGIC_LINK_HIGH, 0, 0) <= SLOGIC_MHZ(80));
 	CHECK(slogic_pick_rate(m32, 4, SLOGIC_LINK_HIGH, 0, 0) > 0);
 	n = slogic_rate_list(m32, 4, SLOGIC_LINK_HIGH, list, 32);
 	CHECK(n > 0 && list[n - 1] <= SLOGIC_MHZ(80) && list[0] < list[n - 1]);
-	n = slogic_rate_list(m32, 4, SLOGIC_LINK_SUPER, list, 32);
+	n = slogic_rate_list(m32, 4, SLOGIC_LINK_SUPER_PLUS, list, 32);
 	CHECK(n == m32->rate_count && list[n - 1] == SLOGIC_MHZ(1400));
+	n = slogic_rate_list(m32, 4, SLOGIC_LINK_SUPER, list, 32);
+	CHECK(n > 0 && list[n - 1] == SLOGIC_MHZ(800));
 }
 
 static int brute_trigger(const slogic_trigger_spec *sp, int nch,
