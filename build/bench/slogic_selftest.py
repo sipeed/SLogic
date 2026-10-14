@@ -449,6 +449,11 @@ def main() -> int:
         cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern={pattern}"
         rc, out, err = run(cli, env, ["-d", DRIVER, "-l", "3", "--config", cfg, "--samples", str(n),
                                       *(extra or []), "-O", "binary"], binary=True, timeout=60)
+        # <= 2.2.0 sent a frame marker, which the binary output writes as text
+        if out.startswith(b"FRAME-BEGIN\n"):
+            out = out[len(b"FRAME-BEGIN\n"):]
+        if out.endswith(b"FRAME-END\n"):
+            out = out[:-len(b"FRAME-END\n")]
         return rc, out, err
 
     # 3.5 exact sample counts, incl. counts whose packed size is not word-aligned (4ch n=1002
