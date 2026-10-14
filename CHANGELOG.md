@@ -49,7 +49,9 @@ sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
 - Multi-stage triggers are rejected (the SLogic trigger is single-stage).
 - The per-transfer `Got … speed:` debug lines are replaced by the
   `slogic-report v1` line.
-- AllLogic does not trigger yet (captures untriggered, as before).
+- AllLogic gains a trigger: DSView's simple trigger (0/1/rising/falling/
+  either per channel) runs on the shared core; advanced multi-stage settings
+  are not used.
 
 ### Internal
 
