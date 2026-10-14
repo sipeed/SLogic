@@ -18,6 +18,8 @@ Phase 0 of build/docs/slogic-driver-plan.md: measure, do not change
 driver behaviour.
 """
 
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import glob
