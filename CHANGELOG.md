@@ -4,7 +4,14 @@ All notable changes to the SLogic all-in-one build (PulseView + SLogicView +
 sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
 `release-X.Y.Z` tags; each platform archive is `SLogic-X.Y.Z-<platform>.zip`.
 
-## v2.3.0 — unreleased
+## v2.3.0 — 2026-10-14
+
+> **Firmware requirement: SLogic32U3 firmware S/N 202610140927 or newer.**
+> Older firmware duplicates the first 8 samples of a capture in some channel
+> modes (8ch@800 MHz, 4ch@200/800/1400 MHz) and keeps streaming after STOP,
+> which can drop the device off the bus. The serial number is shown by
+> `sigrok-cli -d sipeed-slogic-analyzer --scan` (`[S/N: …]`) and in every
+> app's device list.
 
 ### Highlights
 
@@ -51,7 +58,8 @@ sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
   truncated name.
 - Multi-stage triggers are rejected (the SLogic trigger is single-stage).
 - The per-transfer `Got … speed:` debug lines are replaced by the
-  `slogic-report v1` line.
+  `slogic-report v1` line at the end of each capture and a live
+  `slogic-rate` line every 200 ms at log level 4 (`-l 4`).
 - AllLogic gains a trigger: DSView's simple trigger (0/1/rising/falling/
   either per channel) runs on the shared core, and the trigger position
   (pre-trigger depth) is adjustable 0–90% instead of pinned to 1%; advanced
@@ -60,7 +68,8 @@ sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
 ### Internal
 
 - Regression self-test: exact-count, Emulation-head (firmware F1 reported as
-  KNOWN-FW), continuous and trigger-position checks; bundled synthetic
+  KNOWN-FW on firmware older than 202610140927), continuous and
+  trigger-position checks; passes 29/0/0 on Linux, macOS and Windows; bundled synthetic
   UART/SPI/I2C golden decode fixtures; macOS uses 1.5 s captures.
 - `capture_bench.py`: parses the new report line; the MCP samplerate is now
   actually applied (every mode used to run at 200 MHz).
