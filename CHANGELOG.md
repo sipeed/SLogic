@@ -51,7 +51,7 @@ sigrok-cli, plus ngscopeclient) are recorded here. Versions are published as
   `slogic-report v1` line.
 - AllLogic gains a trigger: DSView's simple trigger (0/1/rising/falling/
   either per channel) runs on the shared core, and the trigger position
-  (pre-trigger depth) is adjustable 1–90% instead of pinned to 1%; advanced
+  (pre-trigger depth) is adjustable 0–90% instead of pinned to 1%; advanced
   multi-stage settings are not used.
 
 ### Internal
