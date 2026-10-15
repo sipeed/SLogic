@@ -751,6 +751,92 @@ static void test_report_format(void)
 	      strstr(buf, " trig=at:10,pre:10 "));
 }
 
+
+/*
+ * Sample clock base selection against a device with the SLogic32U3's measured
+ * layout: slot 0 = 1400 MHz, slot 1 = 800 MHz, slots 2-3 empty, the selected
+ * slot remembered across configurations (the index is masked to 2 bits).
+ */
+struct clock_mock {
+	uint8_t last_cmd;
+	uint16_t sel;
+	uint32_t divm1;
+};
+
+static const uint16_t clock_bases[4] = { 1400, 800, 0, 0 };
+
+static int clock_cw(void *ctx, uint8_t req, uint16_t wval, uint16_t widx,
+		    const uint8_t *data, uint16_t len, unsigned to)
+{
+	struct clock_mock *m = ctx;
+	(void)req; (void)widx; (void)to;
+	if (wval == 0x000c)
+		m->last_cmd = data[0];
+	else if (wval == 0x0010 && m->last_cmd == 0x02)
+		m->sel = (uint16_t)((data[0] | (data[1] << 8)) & 3);
+	else if (wval == 0x0014 && m->last_cmd == 0x02)
+		m->divm1 = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+			   ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+	return len;
+}
+
+static int clock_cr(void *ctx, uint8_t req, uint16_t wval, uint16_t widx,
+		    uint8_t *data, uint16_t len, unsigned to)
+{
+	struct clock_mock *m = ctx;
+	uint32_t w = 0;
+	(void)req; (void)widx; (void)to;
+	if (wval == 0x000c)
+		w = (1u << 16) | (((m->last_cmd == 0x02 ? 8u : 4u) << 9) & 0xffffu);
+	else if (wval == 0x0010 && m->last_cmd == 0x02)
+		w = (uint32_t)m->sel | ((uint32_t)clock_bases[m->sel] << 16);
+	else if (wval == 0x0014 && m->last_cmd == 0x02)
+		w = m->divm1;
+	memset(data, 0, len);
+	data[0] = (uint8_t)w;
+	data[1] = (uint8_t)(w >> 8);
+	data[2] = (uint8_t)(w >> 16);
+	data[3] = (uint8_t)(w >> 24);
+	return len;
+}
+
+static int clock_configure(struct clock_mock *m, uint64_t rate, unsigned base)
+{
+	slogic_transport t = { .ctx = m, .control_write = clock_cw, .control_read = clock_cr };
+	slogic_config c = { .channel_count = 8, .samplerate_hz = rate, .threshold_v = 1.6,
+			    .clock_base_mhz = base };
+	return slogic_configure(slogic_model_for_pid(SLOGIC_PID_32U3), &t, &c);
+}
+
+static void test_clock_base(void)
+{
+	struct clock_mock m = { 0 };
+
+	/* Default: 800 MHz first, from slot 0 (where CTRL=RST leaves it) or slot 1. */
+	m.sel = 0;
+	CHECK(clock_configure(&m, SLOGIC_MHZ(200), 0) == SLOGIC_OK);
+	CHECK(m.sel == 1 && m.divm1 == 3);              /* 800 / 4, not 1400 / 7 */
+	m.sel = 0;
+	CHECK(clock_configure(&m, SLOGIC_MHZ(5), 0) == SLOGIC_OK);
+	CHECK(m.sel == 1 && m.divm1 == 159);
+	CHECK(clock_configure(&m, SLOGIC_MHZ(400), 0) == SLOGIC_OK);
+	CHECK(m.sel == 1 && m.divm1 == 1);              /* 800 / 2 */
+	/* Only 1400 MHz falls back, wrapping past the empty slots. */
+	CHECK(clock_configure(&m, SLOGIC_MHZ(1400), 0) == SLOGIC_OK);
+	CHECK(m.sel == 0 && m.divm1 == 0);
+	CHECK(clock_configure(&m, SLOGIC_MHZ(200), 0) == SLOGIC_OK);
+	CHECK(m.sel == 1 && m.divm1 == 3);
+
+	/* Required base: 200 MHz is forced onto the 800 MHz PLL. */
+	m.sel = 0;
+	CHECK(clock_configure(&m, SLOGIC_MHZ(200), 800) == SLOGIC_OK);
+	CHECK(m.sel == 1 && m.divm1 == 3);              /* 800 / 4 */
+	CHECK(clock_configure(&m, SLOGIC_MHZ(5), 800) == SLOGIC_OK);
+	CHECK(m.sel == 1 && m.divm1 == 159);
+	/* A rate the required base cannot make is refused. */
+	CHECK(clock_configure(&m, SLOGIC_MHZ(1400), 800) == SLOGIC_ERR_ARG);
+}
+
 int main(void)
 {
 	test_models();
@@ -761,6 +847,7 @@ int main(void)
 	test_watch_backpressure();
 	test_watch_idle_abort();
 	test_control_sequence();
+	test_clock_base();
 	test_unpack();
 	test_link_caps();
 	test_trigger();
