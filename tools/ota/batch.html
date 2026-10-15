@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>SLogic Batch Update</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <!-- stamp:begin (python3 stamp.py) -->
+  <link rel="stylesheet" href="style.css?v=d9f1fc143f" />
+  <script type="importmap">
+  {
+    "imports": {
+      "./src/app.js": "./src/app.js?v=137003500a",
+      "./src/batch-engine.js": "./src/batch-engine.js?v=88144eb621",
+      "./src/batch.js": "./src/batch.js?v=3fd628ac70",
+      "./src/demo.js": "./src/demo.js?v=6256dd7941",
+      "./src/devices.js": "./src/devices.js?v=b0570fff1a",
+      "./src/flash.js": "./src/flash.js?v=630ea83707",
+      "./src/i18n.js": "./src/i18n.js?v=56431c68dd",
+      "./src/led.js": "./src/led.js?v=f2646e4ce3",
+      "./src/spi.js": "./src/spi.js?v=9cc90ac276",
+      "./src/station.js": "./src/station.js?v=37ceee433b",
+      "./src/updater.js": "./src/updater.js?v=41e6a2a7e5",
+      "./src/usb.js": "./src/usb.js?v=9a0263bf85"
+    }
+  }
+  </script>
+  <!-- stamp:end -->
+  <script>
+    try {
+      const t = localStorage.getItem('slogic-ota-theme');
+      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    } catch {}
+  </script>
+</head>
+<body class="wide">
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="8" />
+        <path d="M6 21h4v-10h4v10h4v-10h4v10h4" />
+      </svg>
+      <div>
+        <h1 data-i18n="batchTitle">SLogic Batch Update</h1>
+        <p class="subtitle" data-i18n="batchSubtitle"></p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <a id="nav" class="button ghost nav-link" data-i18n="navSingle"></a>
+      <button id="lang" class="ghost" type="button"></button>
+      <button id="theme" class="ghost icon" type="button" data-i18n-title="themeToggle">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v2.5M12 20v2.5M1.5 12H4M20 12h2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <div id="banner" class="banner" hidden>
+      <strong id="banner-title"></strong>
+      <span id="banner-body"></span>
+    </div>
+
+    <section class="card setup">
+      <div class="card-head"><h2 data-i18n="setup"></h2></div>
+      <div class="setup-grid">
+        <div class="field">
+          <span class="label" data-i18n="model"></span>
+          <div class="segmented" id="model" role="radiogroup">
+            <button type="button" data-model="slogic32u3" role="radio">SLogic32U3</button>
+            <button type="button" data-model="slogic16u3" role="radio">SLogic16U3</button>
+          </div>
+        </div>
+        <div class="field grow">
+          <span class="label" data-i18n="firmware"></span>
+          <label id="drop" class="drop compact">
+            <input id="file" type="file" accept=".bin,application/octet-stream" hidden />
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/></svg>
+            <span id="file-label" data-i18n="fileHint"></span>
+          </label>
+          <div id="file-meta" class="file-meta" hidden>
+            <span id="file-size"></span> · <code id="file-hash"></code>
+          </div>
+          <ul id="file-warnings" class="warnings" hidden></ul>
+          <label id="ack-row" class="ack" hidden><input id="ack" type="checkbox" /> <span id="ack-text"></span></label>
+        </div>
+      </div>
+      <label class="ack" id="update-normal-row"><input id="update-normal" type="checkbox" /> <span data-i18n="updateNormal"></span></label>
+      <div class="run-row">
+        <button id="run" class="primary large" type="button" data-i18n="startBatch" disabled></button>
+        <p id="run-state" class="muted"></p>
+      </div>
+    </section>
+
+    <section class="counters" aria-live="polite">
+      <div class="counter done"><span id="c-done">0</span><small data-i18n="cDone"></small></div>
+      <div class="counter active"><span id="c-active">0</span><small data-i18n="cActive"></small></div>
+      <div class="counter waiting"><span id="c-waiting">0</span><small data-i18n="cWaiting"></small></div>
+      <div class="counter failed"><span id="c-failed">0</span><small data-i18n="cFailed"></small></div>
+      <div class="counter session"><span id="c-session">0</span><small data-i18n="cSession"></small></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head boards-head">
+        <h2 data-i18n="boards"></h2>
+        <span class="spacer"></span>
+        <button id="add" class="ghost small" type="button" data-i18n="addDevice"></button>
+        <button id="clear" class="ghost small" type="button" data-i18n="clearRemoved"></button>
+      </div>
+      <p class="legend"><span class="legend-item"><span id="legend-app"></span><span data-i18n="legendApp"></span></span><span class="legend-item"><span id="legend-dfu"></span><span data-i18n="legendDfu"></span></span></p>
+      <p id="failed-hint" class="failed-hint" data-i18n="failedHint" hidden></p>
+      <p id="no-boards" class="empty-boards" data-i18n="noBoards"></p>
+      <div id="boards" class="boards"></div>
+
+      <details id="station" class="station">
+        <summary data-i18n="stationTitle"></summary>
+        <p data-i18n="stationBody"></p>
+        <div class="segmented os-tabs" id="os-tabs" role="tablist">
+          <button type="button" data-os="windows">Windows</button>
+          <button type="button" data-os="macos">macOS</button>
+          <button type="button" data-os="linux">Linux</button>
+        </div>
+        <div class="station-actions">
+          <button id="st-install" class="primary" type="button" data-i18n="stInstall"></button>
+          <button id="st-remove" class="ghost" type="button" data-i18n="stRemove"></button>
+        </div>
+        <ol id="st-steps" class="st-steps"></ol>
+        <p class="note" id="st-origin"></p>
+        <details class="st-raw"><summary data-i18n="stRaw"></summary><pre id="policy"></pre></details>
+      </details>
+
+      <details id="log-box" class="log">
+        <summary><span data-i18n="log"></span><button id="copy-log" class="link" type="button" data-i18n="copyLog"></button></summary>
+        <pre id="log"></pre>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <span data-i18n="footer"></span><a id="wiki" target="_blank" rel="noopener" data-i18n="wiki"></a>
+  </footer>
+
+  <script type="module">import "./src/batch.js";</script>
+</body>
+</html>
