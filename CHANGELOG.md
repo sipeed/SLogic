@@ -8,6 +8,27 @@ requirements and installation are in the [README](README.md). A Chinese
 translation of each section is kept in [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
 and appended to the release page.
 
+## v2.3.2 — 2026-10-16
+
+SLogic 2.3.2 is a maintenance release: a fix for Windows and a new minimum
+firmware for SLogic32U3. System requirements, downloads and installation are
+unchanged; see the
+[README](https://github.com/sipeed/SLogic#readme).
+
+> [!IMPORTANT]
+> **SLogic32U3 now requires firmware S/N {{firmware.slogic32u3.min}} or newer.** This
+> firmware brings the improvements of S/N 202610140927 and adds automatic
+> recovery at startup: if the capture path does not come up after power-on or
+> reset, the analyzer re-initializes itself, and a capture starts only once it
+> is ready. To update, see the SLogic wiki ([English]({{firmware.slogic32u3.update_guide.en}}) · [中文]({{firmware.slogic32u3.update_guide.zh}})).
+
+### Fixes
+
+- **Windows: quiet, lighter capture loop.** sigrok-cli, PulseView and
+  SLogicView no longer print repeated "WaitForMultipleObjectsEx failed"
+  messages during a capture, and no longer spend CPU time on them. Captured
+  data was not affected. AllLogic and ngscopeclient were not affected.
+
 ## v2.3.1 — 2026-10-16
 
 SLogic 2.3.1 is a maintenance release: a uniform sample clock on SLogic32U3

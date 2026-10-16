@@ -4,6 +4,22 @@ SLogic 软件包（SLogicView、PulseView、AllLogic、ngscopeclient、sigrok-cl
 内容与 [CHANGELOG.md](CHANGELOG.md) 对应。发布页面 <https://github.com/sipeed/SLogic/releases>
 上依次展示英文与中文两部分；硬件支持、系统要求与安装方法请见 [README](README.md)。
 
+## v2.3.2 — 2026-10-16
+
+SLogic 2.3.2 是一个维护版本：修复 Windows 上的问题，并提高 SLogic32U3 的最低固件版本。系统要求、下载与安装方式不变，详见
+[README](https://github.com/sipeed/SLogic#readme)。
+
+> [!IMPORTANT]
+> **SLogic32U3 现需要固件 S/N {{firmware.slogic32u3.min}} 或更新版本。** 该固件包含
+> S/N 202610140927 的全部改进，并新增启动自动恢复：上电或复位后若采集通路未能正常启动，
+> 分析仪会自动重新初始化，并在就绪后才开始采集。升级方法请参阅 SLogic Wiki（[中文]({{firmware.slogic32u3.update_guide.zh}}) · [English]({{firmware.slogic32u3.update_guide.en}})）。
+
+### 修复
+
+- **Windows：采集过程更安静、更省资源。** sigrok-cli、PulseView 和 SLogicView 在采集时
+  不再反复输出 "WaitForMultipleObjectsEx failed" 信息，也不再因此占用 CPU。采集数据本身
+  不受影响；AllLogic 和 ngscopeclient 不受此问题影响。
+
 ## v2.3.1 — 2026-10-16
 
 SLogic 2.3.1 是一个维护版本：SLogic32U3 的采样时钟更加统一，ngscopeclient 的模拟（ADC）

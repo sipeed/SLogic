@@ -38,7 +38,7 @@ behaviour are identical across them.
 
   For full speed, plug a SLogic32U3 directly into a 10 Gbps port (often marked
   *SS10* or red) with a 10 Gbps-rated cable, not through a hub or dock.
-- **Firmware:** SLogic32U3 requires firmware S/N **202610140927** or newer. The
+- **Firmware:** SLogic32U3 requires firmware S/N **202610150528** or newer. The
   firmware S/N is the `[S/N: …]` shown by
   `sigrok-cli -d sipeed-slogic-analyzer --scan` and in every application's
   device list. To update the firmware, see the SLogic wiki ([English](https://wiki.sipeed.com/hardware/en/logic_analyzer/slogic32u3/Hardware_Specification.html#Firmware-Update) · [中文](https://wiki.sipeed.com/hardware/zh/logic_analyzer/slogic32u3/Hardware_Specification.html#%E6%9B%B4%E6%96%B0%E5%9B%BA%E4%BB%B6)).
