@@ -8,6 +8,38 @@ requirements and installation are in the [README](README.md). A Chinese
 translation of each section is kept in [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
 and appended to the release page.
 
+## v2.3.1 — 2026-10-16
+
+SLogic 2.3.1 is a maintenance release: a uniform sample clock on SLogic32U3
+and better analog (ADC) support in ngscopeclient. System requirements,
+downloads and installation are unchanged; see the
+[README](https://github.com/sipeed/SLogic#readme).
+
+> [!IMPORTANT]
+> **SLogic32U3 requires firmware S/N 202610140927 or newer** (unchanged from
+> 2.3.0). To update, see the SLogic wiki ([English](https://wiki.sipeed.com/hardware/en/logic_analyzer/slogic32u3/Hardware_Specification.html#Firmware-Update) · [中文](https://wiki.sipeed.com/hardware/zh/logic_analyzer/slogic32u3/Hardware_Specification.html#%E6%9B%B4%E6%96%B0%E5%9B%BA%E4%BB%B6)).
+
+### Improvements
+
+- **Uniform sample clock on SLogic32U3.** Every sample rate from 5 to
+  800 MHz is now generated from the analyzer's 800 MHz clock, so all of them
+  share the same clock source; 4ch@1400 MHz keeps its dedicated clock. This
+  applies to every application.
+- **ngscopeclient: analog channel groups (ADC).**
+  - New **ADC bit order** setting in the Stream Browser: *Auto* (CH0 = MSB
+    for real signals, matching the ADC module's wiring, and CH0 = LSB for the
+    built-in test patterns), *CH0 = MSB* or *CH0 = LSB*.
+  - The analog edge trigger now fires only on the selected edge (Rising,
+    Falling or Any) and has built-in hysteresis, for a stable display of
+    noisy signals.
+  - While a group is analog, captures use the ADC's 800 MHz clock so samples
+    stay in step with the ADC; 1400 MHz is not offered in this mode.
+
+### Other
+
+- The libsigrok udev rules include the SLogic32U3, for distributions that
+  package libsigrok.
+
 ## v2.3.0 — 2026-10-14
 
 SLogic 2.3.0 is the first official release of the SLogic software package for

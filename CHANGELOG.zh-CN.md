@@ -4,6 +4,33 @@ SLogic 软件包（SLogicView、PulseView、AllLogic、ngscopeclient、sigrok-cl
 内容与 [CHANGELOG.md](CHANGELOG.md) 对应。发布页面 <https://github.com/sipeed/SLogic/releases>
 上依次展示英文与中文两部分；硬件支持、系统要求与安装方法请见 [README](README.md)。
 
+## v2.3.1 — 2026-10-16
+
+SLogic 2.3.1 是一个维护版本：SLogic32U3 的采样时钟更加统一，ngscopeclient 的模拟（ADC）
+支持得到改进。系统要求、下载与安装方式与 2.3.0 相同，详见
+[README](https://github.com/sipeed/SLogic#readme)。
+
+> [!IMPORTANT]
+> **SLogic32U3 需要固件 S/N 202610140927 或更新版本**（与 2.3.0 相同）。
+> 升级方法请参阅 SLogic Wiki（[中文](https://wiki.sipeed.com/hardware/zh/logic_analyzer/slogic32u3/Hardware_Specification.html#%E6%9B%B4%E6%96%B0%E5%9B%BA%E4%BB%B6) · [English](https://wiki.sipeed.com/hardware/en/logic_analyzer/slogic32u3/Hardware_Specification.html#Firmware-Update)）。
+
+### 改进
+
+- **SLogic32U3 采样时钟统一。** 5 至 800 MHz 的所有采样率现在都由分析仪的 800 MHz
+  时钟产生，共用同一个时钟源；4ch@1400 MHz 仍使用其专用时钟。该改进适用于所有上位机。
+- **ngscopeclient：模拟通道组（ADC）。**
+  - Stream Browser 中新增 **ADC bit order（ADC 比特序）** 设置：*Auto*（真实信号下
+    CH0 = MSB，与 ADC 模块的接线一致；内置测试图案下 CH0 = LSB）、*CH0 = MSB*、
+    *CH0 = LSB*。
+  - 模拟边沿触发现在只在所选边沿（Rising、Falling 或 Any）上触发，并内置迟滞，
+    带噪声的信号也能稳定显示。
+  - 通道组处于模拟模式时，采集使用 ADC 的 800 MHz 时钟，使采样与 ADC 保持同步；
+    该模式下不提供 1400 MHz。
+
+### 其他
+
+- libsigrok 的 udev 规则已包含 SLogic32U3，便于打包 libsigrok 的发行版使用。
+
 ## v2.3.0 — 2026-10-14
 
 SLogic 2.3.0 是 SLogic 软件包的首个正式版本，支持 Windows、macOS 和 Linux。
