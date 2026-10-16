@@ -137,6 +137,8 @@ unplugging boards) or `batch.html?demo=16u3`.
 
 ```text
 index.html, style.css, favicon.svg   the page
+firmware.json     firmware version table (min / latest per model); published
+                  with the pages, also used by build/scripts/release-notes
 batch.html        batch update page
 src/app.js        page controller (UI state, progress, prompts)
 src/batch.js      batch page controller
@@ -171,3 +173,4 @@ node --test test/
 - `batch.test.mjs` runs batches of simulated boards (mixed modes, parallel,
   unplug/replug, already-updated and wrong-model boards).
 - `devices.test.mjs` covers model identification and firmware warnings.
+- `firmware.test.mjs` checks the format of `firmware.json`.

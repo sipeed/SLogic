@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "about": "SLogic firmware versions. The version is the USB serial number in normal mode (YYYYMMDDHHMM). min: oldest firmware the current software supports (older: warn and ask the user to update). latest: newest released firmware (older but >= min: suggest an update). null = no requirement / not published.",
+  "models": {
+    "slogic32u3": {
+      "name": "SLogic32U3",
+      "usb": {
+        "app": "359f:3032",
+        "dfu": "359f:30f2"
+      },
+      "min": "202610150528",
+      "latest": "202610150528",
+      "update_guide": {
+        "en": "https://wiki.sipeed.com/hardware/en/logic_analyzer/slogic32u3/Hardware_Specification.html#Firmware-Update",
+        "zh": "https://wiki.sipeed.com/hardware/zh/logic_analyzer/slogic32u3/Hardware_Specification.html#%E6%9B%B4%E6%96%B0%E5%9B%BA%E4%BB%B6"
+      }
+    },
+    "slogic16u3": {
+      "name": "SLogic16U3",
+      "usb": {
+        "app": "359f:3031",
+        "dfu": "359f:30f1"
+      },
+      "min": null,
+      "latest": null,
+      "update_guide": null
+    }
+  }
+}

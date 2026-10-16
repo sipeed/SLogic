@@ -317,6 +317,7 @@ jobs:
             CHANGELOG.md
             CHANGELOG.zh-CN.md
             build/scripts/release-notes
+            tools/ota/firmware.json
           sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@v4

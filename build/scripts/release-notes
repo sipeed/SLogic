@@ -16,8 +16,27 @@ section() {
         f' "$1" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
 }
 
-en=$(section "$root/CHANGELOG.md")
-zh=$(section "$root/CHANGELOG.zh-CN.md")
+# {{firmware.<model>.<field>[.<key>]}} in a section is replaced from the firmware
+# version table (tools/ota/firmware.json), e.g. {{firmware.slogic32u3.min}} or
+# {{firmware.slogic32u3.update_guide.en}}; an unknown or empty entry is an
+# error, so a release never shows a blank.
+fill() {
+    python3 -c '
+import json, re, sys
+table = json.load(open(sys.argv[1]))["models"]
+def sub(m):
+    value = table
+    for key in m.group(1).split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    if not isinstance(value, str) or not value:
+        sys.exit(f"release-notes: no firmware.{m.group(1)} in {sys.argv[1]}")
+    return value
+sys.stdout.write(re.sub(r"\{\{firmware\.([a-z0-9_.]+)\}\}", sub, sys.stdin.read()))
+' "$root/tools/ota/firmware.json"
+}
+
+en=$(section "$root/CHANGELOG.md" | fill)
+zh=$(section "$root/CHANGELOG.zh-CN.md" | fill)
 
 if [ -z "$en" ]; then
     echo "::warning::CHANGELOG.md has no section for v$ver" >&2
