@@ -317,8 +317,13 @@ jobs:
             CHANGELOG.md
             CHANGELOG.zh-CN.md
             build/scripts/release-notes
-            tools/ota/firmware.json
+            .gitmodules
           sparse-checkout-cone-mode: false
+
+      # The release notes take firmware versions from tools/ota/firmware.json,
+      # which lives in the tools/ota submodule (sipeed/slogic_ota_server).
+      - name: Fetch the firmware version table
+        run: git submodule update --init --depth 1 tools/ota
 
       - uses: actions/download-artifact@v4
         with:

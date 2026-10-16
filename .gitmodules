@@ -26,3 +26,6 @@
 	path = sources/scopehal-apps
 	url = https://github.com/sipeed/scopehal-apps.git
 	branch = feat/SLogic
+[submodule "tools/ota"]
+	path = tools/ota
+	url = https://github.com/sipeed/slogic_ota_server.git
