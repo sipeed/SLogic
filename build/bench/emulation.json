@@ -1,0 +1,21 @@
+{
+  "about": [
+    "Expected Emulation pattern, checked by slogic_selftest.py (3.9 and --soak).",
+    "Every sample is a function of a counter c that starts at counter.start when the capture",
+    "starts and adds 1 per sample (counter.bits wide). Each channel is \"cK\" (bit K of c),",
+    "\"~cK\" (bit K inverted), \"0\" or \"1\". Listed per model, per channel count, CH0 first.",
+    "A model or channel count not listed falls back to the per-channel period check.",
+    "Measured on SLogic32U3 firmware 202610150528 and 202610190735 (all four channel counts)."
+  ],
+  "models": {
+    "SLogic32U3": {
+      "counter": {"bits": 16, "start": 0},
+      "channels": {
+        "4": ["~c0", "~c1", "~c2", "c3"],
+        "8": ["~c0", "~c1", "~c2", "c3", "c4", "c5", "c6", "c7"],
+        "16": ["~c0", "~c1", "~c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12", "c13", "c14", "c15"],
+        "32": ["~c0", "~c1", "~c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12", "c13", "c14", "c15", "c0", "~c0", "c1", "~c1", "c2", "~c2", "~c3", "c3", "~c4", "c4", "~c5", "c5", "~c6", "c6", "~c7", "c7"]
+      }
+    }
+  }
+}

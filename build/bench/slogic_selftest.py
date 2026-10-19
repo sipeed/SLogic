@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -233,6 +234,176 @@ def timed(fn):
 
 
 # ------------------------------------------------------------------------ checks
+_BIT_PLANES = [bytes(((b >> k) & 1) for b in range(256)) for k in range(8)]
+_INVERT = bytes([1, 0]) + bytes(254)
+
+
+def check_periods(out: bytes, nch: int, u: int):
+    """Emulation integrity: every channel is a square wave with a fixed half-period h;
+    require x[i+h] == !x[i] for every sample. Returns (ok, detail, half_periods)."""
+    halves, bad = [], []
+    for ch in range(nch):
+        col = out[ch // 8::u] if u > 1 else out
+        plane = col.translate(_BIT_PLANES[ch % 8])
+        first = plane[0:1]
+        t1 = plane.find(b"\x01" if first == b"\x00" else b"\x00")
+        t2 = plane.find(first, t1) if t1 >= 0 else -1
+        if t1 < 0 or t2 < 0:
+            bad.append(f"CH{ch}: fewer than two edges")
+            continue
+        h = t2 - t1
+        if 4 * h > len(plane):
+            halves.append(f"{h}(skipped)")
+            continue
+        a, b = plane[h:], plane[:-h].translate(_INVERT)
+        if a != b:
+            lo, hi = 0, len(a)              # first differing sample, by bisection
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                lo, hi = (mid, hi) if a[:mid] == b[:mid] else (lo, mid)
+            bad.append(f"CH{ch}: half-period {h} broken at sample {lo + h}")
+            continue
+        halves.append(str(h))
+    if bad:
+        return False, "; ".join(bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else ""), halves
+    return True, "", halves
+
+
+def load_emulation_spec(path: Path, model: str, nch: int):
+    """Expected Emulation pattern for (model, nch) from emulation.json, or None.
+    Returns {"bits", "start", "channels": [(bit or None, invert or const)]}."""
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    m = spec.get("models", {}).get(model)
+    chans = (m or {}).get("channels", {}).get(str(nch))
+    if not chans:
+        return None
+    rules = []
+    for expr in chans:
+        expr = str(expr).strip()
+        if expr in ("0", "1"):
+            rules.append((None, int(expr)))
+        else:
+            mm = re.fullmatch(r"(~?)c(\d+)", expr)
+            if not mm:
+                raise ValueError(f"emulation spec: bad channel rule {expr!r}")
+            rules.append((int(mm.group(2)), 1 if mm.group(1) else 0))
+    if len(rules) != nch:
+        raise ValueError(f"emulation spec: {model} {nch}ch lists {len(rules)} channels")
+    counter = m.get("counter", {})
+    return {"bits": int(counter.get("bits", 16)), "start": counter.get("start"), "channels": rules}
+
+
+_SPEC_PERIODS = {}
+
+
+def _spec_period(spec: dict, u: int):
+    """One full period of the expected sample stream, starting at counter 0."""
+    rules = spec["channels"]
+    key = (tuple(rules), spec["bits"], u)
+    if key not in _SPEC_PERIODS:
+        top = max([b for b, _ in rules if b is not None] or [0])
+        period = 1 << min(top + 1, spec["bits"])
+        words = []
+        for c in range(period):
+            w = 0
+            for ch, (bit, inv) in enumerate(rules):
+                v = inv if bit is None else ((c >> bit) & 1) ^ inv
+                w |= v << ch
+            words.append(w.to_bytes(u, "little"))
+        _SPEC_PERIODS[key] = (period, b"".join(words))
+    return _SPEC_PERIODS[key]
+
+
+def check_spec(out: bytes, nch: int, u: int, spec: dict):
+    """Compare every sample with the Emulation spec (frequency, duty cycle and phase of
+    every channel, and the counter start). Returns (ok, detail)."""
+    period, base = _spec_period(spec, u)
+    n = len(out) // u
+    first = out[:u]
+    if spec["start"] is not None:
+        start = int(spec["start"]) % period
+    else:                                   # free-running: phase from the first sample
+        start = next((c for c in range(period) if base[c * u:(c + 1) * u] == first), None)
+        if start is None:
+            return False, f"sample 0 (0x{int.from_bytes(first, 'little'):0{2 * u}x}) is not in the pattern"
+    ring = base[start * u:] + base[:start * u]
+    ring *= max(1, (1 << 20) // len(ring))  # compare ~1 MiB at a time (whole periods)
+    plen = len(ring)
+    for off in range(0, n * u, plen):
+        chunk = out[off:off + plen]
+        if chunk != ring[:len(chunk)]:
+            i = next(k for k in range(0, len(chunk), u) if chunk[k:k + u] != ring[k:k + u])
+            got = int.from_bytes(chunk[i:i + u], "little")
+            want = int.from_bytes(ring[i:i + u], "little")
+            diff = [f"CH{ch}" for ch in range(nch) if (got ^ want) >> ch & 1]
+            return False, (f"sample {(off + i) // u}: {', '.join(diff[:8])}{' ...' if len(diff) > 8 else ''} "
+                           f"wrong (got 0x{got:0{2 * u}x}, want 0x{want:0{2 * u}x})")
+    return True, f"all {n} samples match the Emulation spec"
+
+
+def emulation_check(out: bytes, nch: int, u: int, spec):
+    """The 3.9 / soak check: the spec when one is defined, else the per-channel period check."""
+    if spec is not None:
+        return check_spec(out, nch, u, spec)
+    ok, detail, halves = check_periods(out, nch, u)
+    return ok, detail if not ok else ("every channel's period exact (no Emulation spec for this mode: "
+                                      f"half-periods {', '.join(halves[:4])} ... {halves[-1]})")
+
+
+def soak(capture_bytes, nch: int, mhz: int, u: int, std: int, args, spec=None):
+    """--soak: capture -> verify -> discard in a loop, alternating Emulation and Normal."""
+    n = mhz * 1000 * args.soak_ms
+    exp_mbps = mhz * nch / 8
+    end_at = time.monotonic() + args.soak * 60
+    stats = {"Emulation": [0, 0], "Normal": [0, 0]}    # rounds, failures
+    failures, rnd, t0 = [], 0, time.monotonic()
+    print(f"  soak: {nch}ch@{mhz}MHz, {args.soak_ms} ms ({n} samples) per round, "
+          f"{args.soak:g} min, Emulation + Normal (floating inputs); Emulation checked "
+          f"{'against the spec' if spec else 'per channel period (no spec for this mode)'}")
+    try:
+        while time.monotonic() < end_at:
+            rnd += 1
+            pattern = "Emulation" if rnd % 2 else "Normal"
+            rc, out, err = capture_bytes(nch, mhz, n, pattern)
+            kv = parse_report(err.decode("utf-8", "replace") if isinstance(err, bytes) else err)
+            problem = ""
+            if rc != 0 or len(out) != n * u:
+                tail = (err.decode("utf-8", "replace") if isinstance(err, bytes) else err).strip().splitlines()
+                problem = f"rc={rc} got {len(out)}B want {n * u}B {tail[-1][:80] if tail else ''}"
+            elif not kv or kv.get("end") != "ok":
+                problem = f"end={kv.get('end') if kv else 'no report'}"
+            elif pattern == "Emulation":
+                ok, detail = emulation_check(out, nch, u, spec)
+                problem = "" if ok else detail
+            else:
+                try:
+                    mbps = float(kv.get("mbps", "nan"))
+                except ValueError:
+                    mbps = float("nan")
+                if not mbps >= exp_mbps * args.min_rate_pct / 100:
+                    problem = f"rate {kv.get('mbps')} MB/s < {args.min_rate_pct}% of {exp_mbps:g}"
+            del out
+            stats[pattern][0] += 1
+            elapsed = time.monotonic() - t0
+            if problem:
+                stats[pattern][1] += 1
+                failures.append(f"round {rnd} {pattern}: {problem}")
+            print(f"  soak {rnd:5d} {int(elapsed // 60):3d}:{int(elapsed % 60):02d} {pattern:9} "
+                  f"{'OK' if not problem else 'FAIL ' + problem}", flush=True)
+    except KeyboardInterrupt:
+        print("  soak: stopped by Ctrl+C")
+    verified = stats["Emulation"][0] - stats["Emulation"][1]
+    summary = (f"{rnd} rounds in {(time.monotonic() - t0) / 60:.1f} min; Emulation "
+               f"{stats['Emulation'][0]} rounds ({verified * n:,} samples exact), "
+               f"{stats['Emulation'][1]} failed; Normal {stats['Normal'][0]} rounds, {stats['Normal'][1]} failed")
+    if failures:
+        summary += " | first: " + "; ".join(failures[:3])
+    return (rnd > 0 and not failures), summary
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sigrok-cli", required=True, help="path to sigrok-cli (executable, portable dir, or .app)")
@@ -247,6 +418,14 @@ def main() -> int:
     ap.add_argument("--usb-speed", choices=("10G", "5G"),
                     help="force the USB link speed standard (default: auto-detect); 5G halves rates + the MB/s standard")
     ap.add_argument("--allow-no-device", action="store_true", help="run device-independent checks only if no device is found")
+    ap.add_argument("--soak", type=float, metavar="MINUTES",
+                    help="soak test only: after device detection, loop capture -> verify -> discard for this many "
+                         "minutes at the widest mode's top rate, alternating Emulation (every sample of every "
+                         "channel must keep its exact period, as 3.9) and Normal with floating inputs (exact "
+                         "sample count, end=ok, full rate). Ctrl+C stops early with a summary")
+    ap.add_argument("--soak-ms", type=int, default=250, help="capture length per soak round in ms (default 250)")
+    ap.add_argument("--emulation-spec", default=str(Path(__file__).resolve().parent / "emulation.json"),
+                    help="expected Emulation pattern (default: emulation.json next to this script)")
     args = ap.parse_args()
     if args.duration_ms is None:
         args.duration_ms = 1500 if sys.platform == "darwin" else DURATION_MS
@@ -342,6 +521,28 @@ def main() -> int:
     info["link"], info["std"] = link, std
     print(f"  [----] 2.3  usb-link                  {link_desc} ({src}) - "
           f"{info['model']} standard {std} MB/s\n")
+
+    def unit_of(nch):
+        return 1 if nch <= 8 else nch // 8
+
+    def capture_bytes(nch, mhz, n, pattern="Emulation", extra=None):
+        cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern={pattern}"
+        rc, out, err = run(cli, env, ["-d", DRIVER, "-l", "3", "--config", cfg, "--samples", str(n),
+                                      *(extra or []), "-O", "binary"], binary=True, timeout=60)
+        # <= 2.2.0 sent a frame marker, which the binary output writes as text
+        if out.startswith(b"FRAME-BEGIN\n"):
+            out = out[len(b"FRAME-BEGIN\n"):]
+        if out.endswith(b"FRAME-END\n"):
+            out = out[:-len(b"FRAME-END\n")]
+        return rc, out, err
+
+    emu_spec = load_emulation_spec(Path(args.emulation_spec), info["model"], modes[-1][0])
+
+    if args.soak:
+        nch, mhz = modes[-1]
+        rep.add("5.1", f"soak-{nch}ch@{mhz}MHz",
+                *timed(lambda: soak(capture_bytes, nch, mhz, unit_of(nch), std, args, emu_spec)))
+        return _finish(rep, info)
 
     # Real throughput test. The driver can "drain at the host's pace": when the USB link is slower
     # than the analyzer it still delivers every requested sample, just below real time — so a
@@ -442,19 +643,6 @@ def main() -> int:
     rep.add("3.4", "stress", *timed(c_stress))
 
     # --- 3.5-3.8: the few firmware-team cases kept here (host_test.py stays with them) ---
-    def unit_of(nch):
-        return 1 if nch <= 8 else nch // 8
-
-    def capture_bytes(nch, mhz, n, pattern="Emulation", extra=None):
-        cfg = f"logic_channels={nch}:samplerate={mhz}m:pattern={pattern}"
-        rc, out, err = run(cli, env, ["-d", DRIVER, "-l", "3", "--config", cfg, "--samples", str(n),
-                                      *(extra or []), "-O", "binary"], binary=True, timeout=60)
-        # <= 2.2.0 sent a frame marker, which the binary output writes as text
-        if out.startswith(b"FRAME-BEGIN\n"):
-            out = out[len(b"FRAME-BEGIN\n"):]
-        if out.endswith(b"FRAME-END\n"):
-            out = out[:-len(b"FRAME-END\n")]
-        return rc, out, err
 
     # 3.5 exact sample counts, incl. counts whose packed size is not word-aligned (4ch n=1002
     # used to crash, odd counts lost a sample).
@@ -524,6 +712,21 @@ def main() -> int:
         ok = edge and trig == "at:10000,pre:10000"
         return ok, f"trig={trig}, D0 {out[9999] & 1}->{out[10000] & 1} at sample 10000"
     rep.add("3.8", "trigger-position", *timed(c_trigger))
+
+    # 3.9 data integrity: in Emulation every channel is a square wave with a fixed
+    # half-period (CH0 1 sample, CH1 2, CH2 4, ...). At the widest mode's top rate, capture
+    # ~250 ms and require x[i+h] == !x[i] for every sample of every channel: one shifted,
+    # dropped, duplicated or corrupted sample anywhere fails the check.
+    def c_period():
+        nch, mhz = modes[-1]
+        n = mhz * 250_000                       # 250 ms
+        u = unit_of(nch)
+        rc, out, _ = capture_bytes(nch, mhz, n)
+        if rc != 0 or len(out) != n * u:
+            return False, f"rc={rc} got {len(out)}B want {n * u}B"
+        ok, detail = emulation_check(out, nch, u, emu_spec)
+        return ok, f"{nch}ch@{mhz}MHz: {detail}"
+    rep.add("3.9", f"emu-period-{modes[-1][0]}ch@{modes[-1][1]}MHz", *timed(c_period))
 
     # --- decode regression against golden .sr (optional) ---
     if args.golden_dir:
