@@ -1,6 +1,8 @@
 #!/bin/sh
 # Print the GitHub release body for version X.Y.Z: the "## vX.Y.Z" section of
-# CHANGELOG.md, then the same section of CHANGELOG.zh-CN.md when it has one.
+# CHANGELOG.md, then the same section of CHANGELOG.zh-CN.md when it has one,
+# each followed by which products changed since the previous release
+# (build/scripts/changed-products).
 # Used by the release job in .github/workflows/build.yml; run it locally to
 # preview or to refresh a published release with `gh release edit --notes-file`.
 set -eu
@@ -35,8 +37,19 @@ sys.stdout.write(re.sub(r"\{\{firmware\.([a-z0-9_.]+)\}\}", sub, sys.stdin.read(
 ' "$root/tools/ota/firmware.json"
 }
 
+# Describe the release tag once it exists, else the current checkout (preview)
+ref=HEAD
+git -C "$root" rev-parse -q --verify "refs/tags/release-$ver" >/dev/null && ref="release-$ver"
+products() {
+    p=$("$root/build/scripts/changed-products" --to "$ref" --notes "$1") || exit 1
+    [ -n "$p" ] && printf '\n\n%s' "$p"
+    return 0
+}
+
 en=$(section "$root/CHANGELOG.md" | fill)
 zh=$(section "$root/CHANGELOG.zh-CN.md" | fill)
+[ -n "$en" ] && en="$en$(products en)"
+[ -n "$zh" ] && zh="$zh$(products zh)"
 
 if [ -z "$en" ]; then
     echo "::warning::CHANGELOG.md has no section for v$ver" >&2

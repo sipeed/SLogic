@@ -311,12 +311,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history and tags: the notes list the products changed since the
+      # previous release-* tag (build/scripts/changed-products reads the pins).
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           sparse-checkout: |
             CHANGELOG.md
             CHANGELOG.zh-CN.md
             build/scripts/release-notes
+            build/scripts/changed-products
+            build/scripts/slogic_toml.py
+            build/components.toml
             .gitmodules
           sparse-checkout-cone-mode: false
 

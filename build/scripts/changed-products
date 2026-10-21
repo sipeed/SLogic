@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Which products changed between two workspace commits (by default: the
+previous release-* tag and HEAD), from the submodule pins and the
+dependencies in build/components.toml.
+
+    changed-products [--from REF] [--to REF]          test scope (see release-process.md)
+    changed-products [--from REF] [--to REF] --notes en|zh
+                                                      "Products in this release" block for
+                                                      the release notes (release-notes uses it)
+
+A product changed when its source checkout or one of its dependencies moved.
+The shared device core (slogic/) reaches the products through their vendored
+copies, so a core change also shows up there; it is reported on its own because
+it calls for a full regression of every host. Only the workspace history is
+needed (no submodule checkouts), so it runs in the release job's sparse checkout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import slogic_toml  # noqa: E402
+
+DISPLAY = {"pulseview": "PulseView", "slogicview": "SLogicView", "sigrok-cli": "sigrok-cli",
+           "all-logic": "AllLogic", "ngscopeclient": "ngscopeclient"}
+
+# Paths under slogic/ that do not ship (host self-test and bench tools)
+CORE_EXCLUDE = [":!slogic/slogic_selftest.c", ":!slogic/tools"]
+# Build and packaging inputs shared by every product
+BUILD_PATHS = ["build", ".github", ":!build/docs", ":!build/bench"]
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", "-C", str(ROOT), *args], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def previous_release(to: str) -> str | None:
+    try:
+        return git("describe", "--tags", "--abbrev=0", "--match", "release-*", f"{to}^")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def pins(ref: str) -> dict[str, str]:
+    out = {}
+    for line in git("ls-tree", ref, "sources/").splitlines():
+        meta, path = line.split("\t", 1)
+        mode, kind, sha = meta.split()
+        if kind == "commit":
+            out[Path(path).name] = sha
+    return out
+
+
+def paths_changed(a: str, b: str, paths: list[str]) -> bool:
+    return bool(git("diff", "--name-only", "--no-renames", a, b, "--", *paths))
+
+
+def commit_count(source: str, a: str, b: str) -> str:
+    """'N commits' when the submodule history is available locally, else ''."""
+    try:
+        n = subprocess.run(["git", "-C", str(ROOT / "sources" / source), "rev-list", "--count", f"{a}..{b}"],
+                           check=True, capture_output=True, text=True).stdout.strip()
+        return f"{n} commit{'' if n == '1' else 's'}"
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
+        return ""
+
+
+def analyse(a: str, b: str):
+    components = slogic_toml.loads((ROOT / "build" / "components.toml").read_text(encoding="utf-8"))
+    old, new = pins(a), pins(b)
+    moved = {name for name in set(old) | set(new) if old.get(name) != new.get(name)}
+    products = []
+    for name, item in components.items():
+        if item.get("kind") != "product":
+            continue
+        why = []
+        for comp in [name, *item.get("dependencies", [])]:
+            src = components[comp]["source"]
+            if src in moved:
+                count = commit_count(src, old.get(src, ""), new.get(src, "")) if src in old and src in new else "new"
+                why.append(f"{src}{f' ({count})' if count else ''}")
+        products.append((name, why))
+    core = paths_changed(a, b, ["slogic", *CORE_EXCLUDE])
+    build = paths_changed(a, b, BUILD_PATHS)
+    return products, core, build
+
+
+def label(ref: str) -> str:
+    return ref[len("release-"):] if ref.startswith("release-") else ref
+
+
+def notes(lang: str, a: str, products, core: bool) -> str:
+    changed = [DISPLAY.get(n, n) for n, why in products if why]
+    same = [DISPLAY.get(n, n) for n, why in products if not why]
+    prev = label(a)
+    if lang == "zh":
+        lines = ["### 本版产品", ""]
+        if core:
+            lines.append("- **全部有更新：** 共用的设备核心 libslogic 有改动，所有上位机都包含这些修改。")
+        elif changed:
+            lines.append(f"- **有更新：** {'、'.join(changed)}")
+        if same and not core:
+            lines.append(f"- **与 {prev} 相同（仅重新构建）：** {'、'.join(same)}")
+    else:
+        lines = ["### Products in this release", ""]
+        if core:
+            lines.append("- **All updated:** the shared device core (libslogic) changed, so every app carries it.")
+        elif changed:
+            lines.append(f"- **Updated:** {', '.join(changed)}")
+        if same and not core:
+            lines.append(f"- **Same as {prev} (rebuilt only):** {', '.join(same)}")
+    return "\n".join(lines)
+
+
+def scope(a: str, b: str, products, core: bool, build: bool) -> str:
+    lines = [f"Changes {label(a)} -> {label(b)}",
+             f"  libslogic core : {'CHANGED - full regression of every host' if core else 'unchanged'}",
+             f"  build/packaging: {'changed - smoke-test every product on every platform' if build else 'unchanged'}",
+             "", "Test scope:"]
+    for name, why in products:
+        if why or core:
+            lines.append(f"  {name:14} FULL   {', '.join(why) if why else 'libslogic core'}")
+        else:
+            lines.append(f"  {name:14} smoke  unchanged")
+    lines += ["", "FULL  = regression checklist for that product (selftest + its manual items) on all platforms",
+              "smoke = sigrok-cli chain: the automatic selftest; GUIs: start, find the device, one capture"]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--from", dest="a", help="base ref (default: the previous release-* tag)")
+    ap.add_argument("--to", dest="b", default="HEAD", help="ref to describe (default: HEAD)")
+    ap.add_argument("--notes", choices=["en", "zh"], help="print the release-notes block in this language")
+    args = ap.parse_args()
+
+    a = args.a or previous_release(args.b)
+    if not a:
+        if args.notes:
+            return 0            # first release: nothing to compare with
+        sys.exit("changed-products: no earlier release-* tag; pass --from")
+    products, core, build = analyse(a, args.b)
+    print(notes(args.notes, a, products, core) if args.notes else scope(a, args.b, products, core, build))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

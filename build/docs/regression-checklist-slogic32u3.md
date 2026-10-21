@@ -2,7 +2,7 @@
 
 **范围**:SLogic16U3 与 SLogic32U3(脚本按 `--scan` **自动识别型号**并选对应档位/标准),
 sigrok-cli / libsigrok 链(SLogicView / PulseView 同一条驱动,一并覆盖),三平台 Linux / macOS /
-Windows。每次固件或上位机更新后跑一遍,通过再发布。(文件名沿用 `-slogic32u3`,现已覆盖两款。)
+Windows。每次固件或上位机更新后跑一遍,通过再发布。上位机发版时先跑 `build/scripts/changed-products` 确定范围:有改动的产品(或 libslogic 核心有改动时全部上位机)按本清单完整回归,没改动的只做冒烟,见 `release-process.md`「Test scope」。(文件名沿用 `-slogic32u3`,现已覆盖两款。)
 
 **方式**:绝大部分由脚本 `build/bench/slogic_selftest.py` 自动完成(自动识别 16U3/32U3),三平台各跑一次;
 少量人工补充。条目标注 **[脚本]**(自动)/ **[人工]**。
