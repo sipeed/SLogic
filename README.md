@@ -109,7 +109,6 @@ SLogic/
 ├── artifact/            versioned deliverables (build output, untracked)
 ├── build/               build system, docs and regression tools
 ├── slogic/              libslogic: shared SLogic USB/capture core
-├── tools/ota/           web firmware update + firmware version table (submodule: sipeed/slogic_ota_server)
 └── sources/             pinned submodules
     ├── libsigrok/       Sipeed fork (sipeed-slogic-analyzer driver)
     ├── libsigrokdecode/ upstream

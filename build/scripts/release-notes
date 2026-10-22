@@ -19,13 +19,23 @@ section() {
 }
 
 # {{firmware.<model>.<field>[.<key>]}} in a section is replaced from the firmware
-# version table (tools/ota/firmware.json), e.g. {{firmware.slogic32u3.min}} or
-# {{firmware.slogic32u3.update_guide.en}}; an unknown or empty entry is an
-# error, so a release never shows a blank.
+# version table: firmware.json of the web update tool (sipeed/slogic_ota_server),
+# or SLOGIC_FIRMWARE_TABLE (a file or URL), e.g. {{firmware.slogic32u3.min}} or
+# {{firmware.slogic32u3.update_guide.en}}; an unknown or empty entry, or a table
+# that cannot be read, is an error, so a release never shows a blank.
+table=${SLOGIC_FIRMWARE_TABLE:-https://raw.githubusercontent.com/sipeed/slogic_ota_server/main/firmware.json}
 fill() {
     python3 -c '
-import json, re, sys
-table = json.load(open(sys.argv[1]))["models"]
+import json, re, sys, urllib.request
+src = sys.argv[1]
+try:
+    if "://" in src:
+        with urllib.request.urlopen(src, timeout=30) as r:
+            table = json.load(r)["models"]
+    else:
+        table = json.load(open(src))["models"]
+except Exception as e:
+    sys.exit(f"release-notes: cannot read the firmware table {src}: {e}")
 def sub(m):
     value = table
     for key in m.group(1).split("."):
@@ -34,7 +44,7 @@ def sub(m):
         sys.exit(f"release-notes: no firmware.{m.group(1)} in {sys.argv[1]}")
     return value
 sys.stdout.write(re.sub(r"\{\{firmware\.([a-z0-9_.]+)\}\}", sub, sys.stdin.read()))
-' "$root/tools/ota/firmware.json"
+' "$table"
 }
 
 # Describe the release tag once it exists, else the current checkout (preview)

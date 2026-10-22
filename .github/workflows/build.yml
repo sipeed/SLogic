@@ -323,13 +323,7 @@ jobs:
             build/scripts/changed-products
             build/scripts/slogic_toml.py
             build/components.toml
-            .gitmodules
           sparse-checkout-cone-mode: false
-
-      # The release notes take firmware versions from tools/ota/firmware.json,
-      # which lives in the tools/ota submodule (sipeed/slogic_ota_server).
-      - name: Fetch the firmware version table
-        run: git submodule update --init --depth 1 tools/ota
 
       - uses: actions/download-artifact@v4
         with:
