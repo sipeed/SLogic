@@ -193,11 +193,16 @@ SLogic16U3 still sets 4.
 ### Transfer sizing (canonical: section 6.5)
 
 A ring of up to 16 transfers, 32 KiB alignment, expected byte rate =
-`samplerate * channel_count / 8`. The core probes a 250 ms buffer (halving
-while the OS refuses it, e.g. the Linux usbfs memory limit; capped at the
-WinUSB RAW_IO maximum on Windows), then quarters it, clamped to
-[32 KiB, 64 MiB] and cached per (channels, rate). A finite untriggered
-capture smaller than one transfer uses one transfer of its own size.
+`samplerate * channel_count / 8`. Each transfer holds ~5 ms of data, clamped
+to [32 KiB, 2 MiB] (and the WinUSB RAW_IO maximum on Windows); a finite
+untriggered capture smaller than one transfer uses one transfer of its own
+size. At least 4 transfers must be in flight (fewer only when the whole
+capture needs fewer): when the OS refuses more (`LIBUSB_ERROR_NO_MEM`; the
+Linux usbfs limit, 16 MB by default and shared by every program, which the
+kernel returns a little after a previous capture ends), the core takes the
+ring back before RUN, waits 25 ms up to 4 times, then halves the size, down
+to 32 KiB; if still short it warns ("only N USB transfers ... in flight") and
+the report shows the ring (`xfer=SIZExN`).
 
 ### Stall / completion policy (canonical: section 6.2)
 
@@ -311,13 +316,27 @@ libsigrok's old inline `first_here` drop is gone.
 
 libsigrok retries 6, all-logic 8. **Canonical:** 8 (harmless headroom).
 
-### 6.5 Transfer sizing — RESOLVED toward the libsigrok probe
+### 6.5 Transfer sizing — ~5 ms transfers, at least 4 in flight (2.3.3)
 
-The libsigrok probe strategy (section 3) is the one proven at full rate on all
-three OSes (Windows RAW_IO in 2.1, macOS ~50 MB transfers). With throughput
-now measured by a fit over completions (section 9), transfer size no longer
-biases the reported rate, so the latency argument for ~4 ms transfers is gone.
-`SLOGIC_SIZING_ALLLOGIC` remains for experiments.
+2.3.0 to 2.3.2 used the libsigrok probe (250 ms of data, quartered, up to
+64 MiB; proven at full rate on all three OSes, macOS with ~50 MB transfers).
+Two field problems came from it:
+
+- **Linux usbfs limit.** 16ch @ 200 MHz used 3.1 MB transfers, 5 in flight =
+  15.6 MB of the 16 MB default. A capture started right after another (the
+  kernel had not yet returned the previous one's memory) got 1 transfer in
+  flight; the bulk pipe then idles between completions, the analyzer's FIFO
+  overflows and the firmware drops data silently (end=ok, exact count,
+  discontinuous data; ~1 in 700 back-to-back captures on a SLogic16U3).
+- **Large transfers on some xHCI controllers.** 4ch @ 800 MHz used 25 MB
+  transfers (16 in flight = 400 MB); on a Ryzen laptop the stream fell to
+  ~40 MB/s and stalled, where AllLogic 2.1.0 (1.6 MB transfers) ran at full
+  rate.
+
+~5 ms transfers (AllLogic's original choice) keep 7-8 in flight within the
+default usbfs limit and complete often. Throughput is measured by a fit over
+completions (section 9), so the size does not bias the reported rate. **To
+validate:** full rate on Windows (RAW_IO) and macOS with 2 MiB transfers.
 
 ### 6.6 VTH→DAC rounding — RESOLVED toward round
 
