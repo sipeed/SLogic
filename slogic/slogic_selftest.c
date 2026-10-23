@@ -752,6 +752,32 @@ static void test_report_format(void)
 }
 
 
+/* Combo 8 start: [rate MHz lo][rate MHz hi][channels][pattern], one vendor OUT 0xB1. */
+static void test_combo8_start(void)
+{
+	struct mock_ctx mk;
+	slogic_transport t;
+	slogic_config c;
+
+	memset(&mk, 0, sizeof(mk));
+	t.ctx = &mk;
+	t.control_write = mock_cw;
+	t.control_read = mock_cr;
+	memset(&c, 0, sizeof(c));
+	c.channel_count = 4;
+	c.samplerate_hz = SLOGIC_MHZ(320);
+	c.pattern_mode = SLOGIC_PATTERN_EMULATION;
+	CHECK(slogic_run(slogic_model_for_pid(SLOGIC_PID_COMBO8), &t, &c) == SLOGIC_OK);
+	CHECK(mk.n == 1 && !mk.rec[0].is_read && mk.rec[0].req == 0xb1);
+	CHECK(eq4(mk.rec[0].data, 0x40, 0x01, 4, SLOGIC_PATTERN_EMULATION));
+
+	/* Normal mode keeps the byte older firmware has always seen: 0. */
+	memset(&mk, 0, sizeof(mk));
+	c.pattern_mode = SLOGIC_PATTERN_NORMAL;
+	CHECK(slogic_run(slogic_model_for_pid(SLOGIC_PID_COMBO8), &t, &c) == SLOGIC_OK);
+	CHECK(eq4(mk.rec[0].data, 0x40, 0x01, 4, 0));
+}
+
 /*
  * Sample clock base selection against a device with the SLogic32U3's measured
  * layout: slot 0 = 1400 MHz, slot 1 = 800 MHz, slots 2-3 empty, the selected
@@ -847,6 +873,7 @@ int main(void)
 	test_watch_backpressure();
 	test_watch_idle_abort();
 	test_control_sequence();
+	test_combo8_start();
 	test_clock_base();
 	test_unpack();
 	test_link_caps();

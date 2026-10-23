@@ -144,8 +144,12 @@ No register map. A single vendor OUT command starts acquisition:
 
 ```
 bRequest = 0xB1 (CMD_START), wValue = 0, wIndex = 0
-payload  = [uint16 sample_rate_mhz little-endian][uint8 channel_count][pad]  (4 bytes)
+payload  = [uint16 sample_rate_mhz little-endian][uint8 channel_count][uint8 pattern]  (4 bytes)
 ```
+
+`pattern` is the pattern mode (`SLOGIC_PATTERN_*`: 0 normal, 1 USB test,
+2 emulation), read by newer SLogic8 U2 firmware; older firmware ignores the
+byte, which used to be 0.
 
 `CMD_STOP` (0xB3) exists but is unreliable in current firmware; the documented
 stop is to drain the bulk IN endpoint (read until a short/empty transfer).
