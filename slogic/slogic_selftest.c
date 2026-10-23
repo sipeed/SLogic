@@ -28,11 +28,31 @@ static void test_models(void)
 	const slogic_model *m32 = slogic_model_for_pid(SLOGIC_PID_32U3);
 	size_t n = 0;
 
-	CHECK(c8 && strcmp(c8->name, "SLogic Combo 8") == 0);
+	const slogic_model *u2 = slogic_model_for_pid(SLOGIC_PID_8U2);
+
+	CHECK(c8 && strcmp(c8->name, "SLogic8U2") == 0);
+	/* SLogic8U2: new PID 0x3000, no prefix (USB2 only); the old 0x0300
+	 * firmware is the same model, named "(old) SLogic8U2" to prompt an update. */
+	CHECK(u2 && u2->proto == SLOGIC_PROTO_COMBO8 && u2->max_bandwidth_hz == c8->max_bandwidth_hz);
+	CHECK(u2 && !strcmp(u2->name, "SLogic8U2"));
+	CHECK(!strcmp(slogic_name_tag(c8, SLOGIC_LINK_HIGH), "old"));
+	{
+		char b[64];
+		CHECK(!strcmp(slogic_display_name(m32, SLOGIC_LINK_SUPER_PLUS, b, sizeof(b)), "(10G) SLogic32 U3"));
+		CHECK(!strcmp(slogic_display_name(m16, SLOGIC_LINK_SUPER, b, sizeof(b)), "(5G) SLogic16 U3"));
+		CHECK(!strcmp(slogic_display_name(u2, SLOGIC_LINK_HIGH, b, sizeof(b)), "(480M) SLogic8 U2"));
+		CHECK(!strcmp(slogic_display_name(c8, SLOGIC_LINK_HIGH, b, sizeof(b)), "(old) SLogic8 U2"));
+		CHECK(!strcmp(slogic_display_name(m32, SLOGIC_LINK_HIGH, b, sizeof(b)), "(480M) SLogic32 U3"));
+		CHECK(!strcmp(slogic_display_name(m32, SLOGIC_LINK_UNKNOWN, b, sizeof(b)), "SLogic32 U3"));
+	}
 	CHECK(m16 && m16->pid == 0x3031 && m16->ep_in == 0x82);
 	CHECK(m32 && m32->pid == 0x3032 && m32->physical_channels == 32);
 	CHECK(slogic_model_for_pid(0x30f1) == NULL); /* DFU is not a runtime model */
-	CHECK(slogic_models(&n) != NULL && n == 3);
+	CHECK(slogic_model_for_pid(0x30f0) == NULL); /* 8U2 DFU either */
+	CHECK(slogic_is_analyzer(0x359f, 0x3000) && slogic_is_analyzer(0x359f, 0x0300) &&
+	      slogic_is_analyzer(0x359f, 0x3032) && !slogic_is_analyzer(0x359f, 0x30f2) &&
+	      !slogic_is_analyzer(0x1a86, 0x3032));
+	CHECK(slogic_models(&n) != NULL && n == 4);
 
 	/* Ceilings: same physical mapping the two drivers agree on. */
 	CHECK(slogic_max_rate(m16, 4) == SLOGIC_MHZ(800));
@@ -730,14 +750,14 @@ static void test_report_format(void)
 
 	memset(&r, 0, sizeof(r));
 	r.end = SLOGIC_END_OK;
-	r.model = "SLogic Combo 8";
+	r.model = "SLogic8U2";
 	r.nch = 8;
 	r.samplerate_hz = SLOGIC_MHZ(40);
 	r.samples = r.limit = 1000;
 	r.mbps = 39.9;
 	r.fit_n = 5;
 	slogic_report_format(&r, buf, sizeof(buf));
-	CHECK(strncmp(buf, "slogic-report v1 model=SLogic_Combo_8 ch=8 rate_mhz=40 end=ok ", 62) == 0);
+	CHECK(strncmp(buf, "slogic-report v1 model=SLogic8U2 ch=8 rate_mhz=40 end=ok ", 57) == 0);
 	CHECK(strstr(buf, " samples=1000/1000 ") && strstr(buf, " mbps=39.9 ") &&
 	      strstr(buf, " trig=none "));
 	r.end = SLOGIC_END_ERROR;

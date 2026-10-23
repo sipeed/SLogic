@@ -6,9 +6,14 @@ carry a byte-identical copy under their own hardware directory and adapt it with
 a thin porting layer, so the USB protocol has exactly one implementation
 (build/docs/slogic-protocol.md, plan decision #1).
 
-    vendor-slogic sync    copy the canonical sources into each driver (default)
-    vendor-slogic check   verify every vendored copy is byte-identical; used by
-                          CI and pre-commit to catch a copy that drifted
+    vendor-slogic sync    copy the canonical sources into each driver and
+                          regenerate the SLogic block of the udev rules (default)
+    vendor-slogic check   verify every vendored copy is byte-identical and the
+                          rules match the model table; used by CI and pre-commit
+
+The supported USB IDs exist only in the core's model table (slogic/slogic*.c);
+front ends call slogic_is_analyzer() and slogic_model_for_pid(). udev rules
+cannot call code, so their SLogic block is generated from that table.
 
 Only the core sources are vendored; slogic_selftest.c is a host test and stays
 at the top level.
@@ -19,6 +24,7 @@ from __future__ import annotations
 import argparse
 import filecmp
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -36,6 +42,50 @@ DEST_DIRS = [
 ROOT = Path(__file__).resolve().parents[2]
 CANONICAL = ROOT / "slogic"
 
+# udev rules carrying a generated SLogic block: path -> line template
+RULES = {
+    "sources/libsigrok/contrib/60-libsigrok.rules":
+        'ATTRS{{idVendor}}=="{vid}", ATTRS{{idProduct}}=="{pid}", ENV{{ID_SIGROK}}="1"',
+    "sources/all-logic/DSView/DreamSourceLab.rules":
+        'SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{vid}", ATTRS{{idProduct}}=="{pid}", MODE="0666"',
+}
+BEGIN = "# BEGIN SLogic"
+END = "# END SLogic"
+
+
+def models() -> list[tuple[str, str, str]]:
+    """(pid, product, note) of every model in the core's table, sorted by PID."""
+    header = (CANONICAL / "slogic.h").read_text()
+    vid = re.search(r"#define SLOGIC_VID\s+UINT16_C\((0x[0-9a-fA-F]+)\)", header).group(1)
+    pids = dict(re.findall(r"#define (SLOGIC_PID_\w+)\s+UINT16_C\((0x[0-9a-fA-F]+)\)", header))
+    out = []
+    for f in sorted(CANONICAL.glob("slogic*.c")):
+        for body in re.findall(r"const slogic_model \w+ = \{(.*?)\};", f.read_text(), re.S):
+            pid = pids[re.search(r"\.pid = (SLOGIC_PID_\w+)", body).group(1)]
+            product = re.search(r'\.product = "([^"]*)"', body).group(1)
+            tag = re.search(r'\.name_tag = "([^"]*)"', body)
+            out.append((f"{int(pid, 16):04x}", product, f" ({tag.group(1)} firmware)" if tag else ""))
+    return [(f"{int(vid, 16):04x}",) + m for m in sorted(out)]
+
+
+def rules_block(template: str) -> str:
+    lines = [BEGIN]
+    for vid, pid, product, note in models():
+        lines.append(f"# {product}{note}")
+        lines.append(template.format(vid=vid, pid=pid))
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def rules_text(path: Path, template: str) -> str:
+    """The rules file with its SLogic block regenerated."""
+    text = path.read_text()
+    if BEGIN not in text or END not in text:
+        raise SystemExit(f"{path}: no '{BEGIN}' ... '{END}' block")
+    head, rest = text.split(BEGIN, 1)
+    _, tail = rest.split(END, 1)
+    return head + rules_block(template) + tail
+
 
 def sync() -> int:
     for rel in DEST_DIRS:
@@ -44,6 +94,10 @@ def sync() -> int:
         for name in CORE_FILES:
             shutil.copy2(CANONICAL / name, dest / name)
         print(f"vendored {len(CORE_FILES)} files -> {rel}")
+    for rel, template in RULES.items():
+        path = ROOT / rel
+        path.write_text(rules_text(path, template))
+        print(f"regenerated the SLogic block of {rel}")
     return 0
 
 
@@ -58,12 +112,17 @@ def check() -> int:
                 drift.append(f"{rel}/{name}: missing (run: vendor-slogic sync)")
             elif not filecmp.cmp(src, copy, shallow=False):
                 drift.append(f"{rel}/{name}: differs from canonical slogic/{name}")
+    for rel, template in RULES.items():
+        path = ROOT / rel
+        if path.read_text() != rules_text(path, template):
+            drift.append(f"{rel}: SLogic udev block differs from the model table (run: vendor-slogic sync)")
     if drift:
         print("libslogic vendored copies are out of sync:", file=sys.stderr)
         for line in drift:
             print(f"  {line}", file=sys.stderr)
         return 1
-    print(f"all {len(CORE_FILES) * len(DEST_DIRS)} vendored copies match canonical")
+    print(f"all {len(CORE_FILES) * len(DEST_DIRS)} vendored copies match canonical; "
+          f"{len(RULES)} udev rule files match the model table")
     return 0
 
 

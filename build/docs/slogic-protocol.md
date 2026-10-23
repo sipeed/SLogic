@@ -31,14 +31,31 @@ this spec resolves its section 8 open decision #1) and
 
 | Product      | VID    | PID (run) | Bulk IN EP | Phys ch | Wire ceiling |
 |--------------|--------|-----------|-----------|---------|--------------|
-| SLogic Combo 8 | 0x359F | 0x0300 | 0x81 | 8  | 320 MHz·ch   |
+| SLogic8U2 (Combo 8) | 0x359F | 0x3000 | 0x81 | 8  | 320 MHz·ch   |
+| SLogic8U2, old firmware | 0x359F | 0x0300 | 0x81 | 8  | 320 MHz·ch   |
 | SLogic16U3     | 0x359F | 0x3031 | 0x82 | 16 | 3200 MHz·ch  |
 | SLogic32U3     | 0x359F | 0x3032 | 0x82 | 32 | 6400 MHz·ch  |
 
-The DFU/bootloader PID is `0x30f1` (external knowledge — it is not referenced by
-either driver, which do not handle firmware update, and neither does
-`libslogic`). The Combo 8 speaks a small command protocol; the two U3
-models share one register/AUX protocol (`SLOGIC_PROTO_U3`).
+The DFU/bootloader PIDs are `0x30f1` / `0x30f2` (16U3 / 32U3) and `0x30f0`
+(8U2) (external knowledge — they are not referenced by either driver, which do
+not handle firmware update, and neither does `libslogic`). An SLogic8U2 on old
+firmware still enumerates as `0x0300`; it works the same.
+
+**Device table.** The supported USB IDs exist only in the core's model table
+(`slogic/slogic*.c`). Front ends ask `slogic_is_analyzer()` and
+`slogic_model_for_pid()` (scan, hotplug, reconnect); the SLogic block of the
+udev rules (`60-libsigrok.rules`, AllLogic's `DreamSourceLab.rules`) is
+generated from the table by `build/scripts/vendor-slogic sync`, and
+`vendor-slogic check` fails when it is stale.
+
+**Device names.** Every app shows the name the core builds
+(`slogic_display_name()`): a prefix, then the USB product string
+(`slogic_model.product`). The prefix is the link speed, `(10G)`, `(5G)`,
+`(480M)` or `(12M)`, or `(old)` for an SLogic8U2 on old firmware so the user
+updates it: `(10G) SLogic32 U3`, `(480M) SLogic8 U2`, `(old) SLogic8 U2`.
+
+The Combo 8 speaks a small command protocol; the two U3 models share one
+register/AUX protocol (`SLOGIC_PROTO_U3`).
 
 Interface 0 is claimed; there is one bulk IN endpoint and the vendor control
 endpoint 0.
@@ -148,7 +165,7 @@ payload  = [uint16 sample_rate_mhz little-endian][uint8 channel_count][uint8 pat
 ```
 
 `pattern` is the pattern mode (`SLOGIC_PATTERN_*`: 0 normal, 1 USB test,
-2 emulation), read by newer SLogic8 U2 firmware; older firmware ignores the
+2 emulation), read by newer SLogic8U2 firmware; older firmware ignores the
 byte, which used to be 0.
 
 `CMD_STOP` (0xB3) exists but is unreliable in current firmware; the documented
