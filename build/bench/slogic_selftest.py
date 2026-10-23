@@ -50,7 +50,8 @@ import sys
 import time
 from pathlib import Path
 
-DRIVER = "sipeed-slogic-analyzer"
+DRIVER_NAME = "sipeed-slogic-analyzer"
+DRIVER = DRIVER_NAME             # "-d" argument; --conn appends ":conn=..."
 VENDOR_ID = "359f"
 # Per-model channel-mode -> max sample rate (MHz) and aggregate standard (MB/s) at the model's
 # native USB link (aggregate = channels * MHz / 8; source slogic/slogic*.c). 32U3 is USB 10G
@@ -317,6 +318,26 @@ def _spec_period(spec: dict, u: int):
     return _SPEC_PERIODS[key]
 
 
+def _spec_slip(out: bytes, s: int, u: int, base: bytes, period: int, start: int, reach: int = 64,
+               run: int = 16):
+    """At the first wrong sample s: if the stream resumes the expected pattern shifted by d samples
+    (d > 0: d samples missing, d < 0: repeated), return d, else 0. Needs `run` matching samples."""
+    got = out[s * u:(s + run) * u]
+    if len(got) < run * u:
+        return 0
+
+    def expected(j):
+        k = (start + j) % period
+        seq = base[k * u:] + base[:k * u]
+        while len(seq) < run * u:
+            seq += base
+        return seq[:run * u]
+    for d in sorted(range(-reach, reach + 1), key=abs):
+        if d and s + d >= 0 and expected(s + d) == got:
+            return d
+    return 0
+
+
 def check_spec(out: bytes, nch: int, u: int, spec: dict):
     """Compare every sample with the Emulation spec (frequency, duty cycle and phase of
     every channel, and the counter start). Returns (ok, detail)."""
@@ -338,8 +359,14 @@ def check_spec(out: bytes, nch: int, u: int, spec: dict):
             i = next(k for k in range(0, len(chunk), u) if chunk[k:k + u] != ring[k:k + u])
             got = int.from_bytes(chunk[i:i + u], "little")
             want = int.from_bytes(ring[i:i + u], "little")
+            s = (off + i) // u
+            slip = _spec_slip(out, s, u, base, period, start)
+            if slip:
+                return False, (f"sample {s} (byte 0x{s * u:x}): {abs(slip)} sample(s) "
+                               f"{'missing' if slip > 0 else 'repeated'} ({abs(slip) * u} bytes), "
+                               f"the stream continues {abs(slip)} sample(s) {'ahead' if slip > 0 else 'behind'}")
             diff = [f"CH{ch}" for ch in range(nch) if (got ^ want) >> ch & 1]
-            return False, (f"sample {(off + i) // u}: {', '.join(diff[:8])}{' ...' if len(diff) > 8 else ''} "
+            return False, (f"sample {s}: {', '.join(diff[:8])}{' ...' if len(diff) > 8 else ''} "
                            f"wrong (got 0x{got:0{2 * u}x}, want 0x{want:0{2 * u}x})")
     return True, f"all {n} samples match the Emulation spec"
 
@@ -418,6 +445,9 @@ def main() -> int:
     ap.add_argument("--usb-speed", choices=("10G", "5G"),
                     help="force the USB link speed standard (default: auto-detect); 5G halves rates + the MB/s standard")
     ap.add_argument("--allow-no-device", action="store_true", help="run device-independent checks only if no device is found")
+    ap.add_argument("--conn", metavar="VID.PID|BUS.ADDR",
+                    help="pick one analyzer when several are connected, e.g. 359f.3031 (SLogic16U3) or 2.17 "
+                         "(needs a sigrok-cli whose driver supports conn=)")
     ap.add_argument("--soak", type=float, metavar="MINUTES",
                     help="soak test only: after device detection, loop capture -> verify -> discard for this many "
                          "minutes at the widest mode's top rate, alternating Emulation (every sample of every "
@@ -427,6 +457,9 @@ def main() -> int:
     ap.add_argument("--emulation-spec", default=str(Path(__file__).resolve().parent / "emulation.json"),
                     help="expected Emulation pattern (default: emulation.json next to this script)")
     args = ap.parse_args()
+    global DRIVER
+    if args.conn:
+        DRIVER = f"{DRIVER_NAME}:conn={args.conn}"
     if args.duration_ms is None:
         args.duration_ms = 1500 if sys.platform == "darwin" else DURATION_MS
     if args.golden_dir is None and (Path(__file__).resolve().parent / "golden").is_dir():
@@ -455,7 +488,7 @@ def main() -> int:
 
     def c_driver():
         rc, out, _ = run(cli, env, ["-L"])
-        return (rc == 0 and DRIVER in out), f"{DRIVER} " + ("present" if DRIVER in out else "MISSING")
+        return (rc == 0 and DRIVER_NAME in out), f"{DRIVER_NAME} " + ("present" if DRIVER_NAME in out else "MISSING")
     rep.add("1.2", "driver", *timed(c_driver))
 
     def c_decoder():

@@ -95,7 +95,9 @@ python3 slogic_selftest.py --sigrok-cli <步骤1的路径> \
 | 3.8 | 触发位置:8ch@10MHz Emulation,`D0=r`,`captureratio=10`,100000 样本 | 触发在第 10000 个样本(`trig=at:10000`),D0 在 9999→10000 由 0 变 1 | |
 | 3.9 | 数据准确性:最大通道数下的最高采样率(32U3 10G:32ch@200MHz;5G:32ch@100MHz),Emulation 采 250 ms | 每个样本都与 `build/bench/emulation.json` 定义的 Emulation 图案逐位一致(各通道频率、占空比、相位、通道顺序,以及计数器从 0 开始);失败时给出样本位置和出错的通道。没有该型号/通道数的定义时,退回逐通道固定周期检查 | |
 
-**长时间压测(单独运行):** `python3 slogic_selftest.py --sigrok-cli <...> --soak 30` 只做设备识别后循环采集:最大通道数下最高采样率,每轮 `--soak-ms`(默认 250 ms),Emulation 与 Normal(输入悬空)交替;Emulation 每轮按 3.9 与图案定义逐样本比对,Normal 每轮要求 `end=ok`、样本数精确、速率达标。采完即校验并丢弃,结束(或 Ctrl+C)时输出总轮数、校验的样本总数和最先的失败(含通道和样本位置)。Emulation 图案改了只需改 `emulation.json`,不用改脚本。
+**长时间压测(单独运行):** `python3 slogic_selftest.py --sigrok-cli <...> --soak 30` 只做设备识别后循环采集:最大通道数下最高采样率,每轮 `--soak-ms`(默认 250 ms),Emulation 与 Normal(输入悬空)交替;Emulation 每轮按 3.9 与图案定义逐样本比对,Normal 每轮要求 `end=ok`、样本数精确、速率达标。采完即校验并丢弃,结束(或 Ctrl+C)时输出总轮数、校验的样本总数和最先的失败(含通道和样本位置)。Emulation 图案改了只需改 `emulation.json`,不用改脚本。出错时会区分「数据流错位」(报告丢了或重复了几个样本,以及字节偏移)和「数值错误」(报告出错的通道)。
+
+**同时接了多台分析仪时:** 加 `--conn 359f.3031`(按 VID.PID,16U3 为 3031、32U3 为 3032)或 `--conn 2.17`(按总线.地址)只测其中一台;需要支持 `conn=` 的驱动(2.3.3 起)。
 | 4.1 | 解码黄金 `.sr`(默认用脚本旁 `golden/`:UART / SPI / I²C) | 与黄金输出一致 | |
 
 > macOS 首次运行 CLI 产物若被 Gatekeeper 拦,内部测试放行即可(非 GUI 签名范畴)。
