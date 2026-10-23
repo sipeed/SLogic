@@ -92,6 +92,22 @@ def parse_report(err: str):
     return dict(t.split("=", 1) for t in found[-1].split() if "=" in t)
 
 
+MIN_IN_FLIGHT = 4
+
+
+def ring_problem(kv) -> str:
+    """'' or why the USB transfer ring was too small. With fewer than MIN_IN_FLIGHT transfers in
+    flight (unless the whole capture needed fewer) the analyzer's FIFO can overflow, and the
+    firmware then drops data without telling the host: end=ok, exact count, broken data."""
+    try:
+        size, n = (int(x) for x in kv.get("xfer", "").split("x"))
+        raw = int(kv.get("bytes", 0))
+    except (AttributeError, ValueError):
+        return ""                                   # no ring figure (legacy driver)
+    need = min(MIN_IN_FLIGHT, max(1, -(-raw // size))) if size else MIN_IN_FLIGHT
+    return f"only {n} USB transfer(s) of {size} B in flight (need {need})" if n < need else ""
+
+
 def _bps_to_gen(bps: int) -> str:
     if bps >= 10_000_000_000:
         return "10G"
@@ -402,6 +418,8 @@ def soak(capture_bytes, nch: int, mhz: int, u: int, std: int, args, spec=None):
                 problem = f"rc={rc} got {len(out)}B want {n * u}B {tail[-1][:80] if tail else ''}"
             elif not kv or kv.get("end") != "ok":
                 problem = f"end={kv.get('end') if kv else 'no report'}"
+            elif ring_problem(kv):
+                problem = ring_problem(kv)
             elif pattern == "Emulation":
                 ok, detail = emulation_check(out, nch, u, spec)
                 problem = "" if ok else detail
@@ -602,7 +620,7 @@ def main() -> int:
             return dict(mbps=num("mbps"), exp=num("exp_mbps"), ok_count=got == lim,
                         mb=int(kv.get("bytes", 0)) / 1e6, span_ms=num("span_ms"),
                         cold_ms=num("cold_ms"), fit_n=int(kv.get("fit_n", 0)),
-                        end=kv.get("end", "?")), None
+                        end=kv.get("end", "?"), ring=ring_problem(kv)), None
         speeds, gots = SPEED_RE.findall(err), GOT_RE.findall(err)   # legacy <= 2.2.0 driver
         if not speeds:
             return None, "driver printed no slogic-report line (need -l 3 or more)"
@@ -624,6 +642,8 @@ def main() -> int:
             return False, f"end={r['end']} " + detail
         if not r["ok_count"]:
             return False, "incomplete " + detail
+        if r.get("ring"):
+            return False, r["ring"] + "; " + detail
         if r["fit_n"] < 3:
             return False, "few transfers for the rate fit, raise --duration-ms; " + detail
         if pct < min_pct:
@@ -754,11 +774,14 @@ def main() -> int:
         nch, mhz = modes[-1]
         n = mhz * 250_000                       # 250 ms
         u = unit_of(nch)
-        rc, out, _ = capture_bytes(nch, mhz, n)
+        rc, out, err = capture_bytes(nch, mhz, n)
         if rc != 0 or len(out) != n * u:
             return False, f"rc={rc} got {len(out)}B want {n * u}B"
         ok, detail = emulation_check(out, nch, u, emu_spec)
-        return ok, f"{nch}ch@{mhz}MHz: {detail}"
+        ring = ring_problem(parse_report(err.decode("utf-8", "replace") if isinstance(err, bytes) else err) or {})
+        if ok and ring:
+            return False, f"{nch}ch@{mhz}MHz: {ring} (data matched this time, but may not)"
+        return ok, f"{nch}ch@{mhz}MHz: {detail}{'; ' + ring if ring else ''}"
     rep.add("3.9", f"emu-period-{modes[-1][0]}ch@{modes[-1][1]}MHz", *timed(c_period))
 
     # --- decode regression against golden .sr (optional) ---
