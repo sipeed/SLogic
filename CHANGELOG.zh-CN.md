@@ -4,6 +4,46 @@ SLogic 软件包（SLogicView、PulseView、AllLogic、ngscopeclient、sigrok-cl
 内容与 [CHANGELOG.md](CHANGELOG.md) 对应。发布页面 <https://github.com/sipeed/SLogic/releases>
 上依次展示英文与中文两部分；硬件支持、系统要求与安装方法请见 [README](README.md)。
 
+## v2.3.3 — 2026-10-30
+
+SLogic 2.3.3 提升了各平台的采集可靠性，支持 SLogic8U2 新固件，并为 ngscopeclient
+带来 X-Y 视图和更完善的 ADC 支持。系统要求、下载与安装方式不变，详见
+[README](https://github.com/sipeed/SLogic#readme)。
+
+> [!IMPORTANT]
+> **SLogic16U3 现需要固件 S/N {{firmware.slogic16u3.min}} 或更新版本。** 使用该固件后，
+> 网页升级工具可以自动让分析仪进入升级模式，无需再按 MODE 键。升级方法请参阅 SLogic Wiki（[中文]({{firmware.slogic16u3.update_guide.zh}}) · [English]({{firmware.slogic16u3.update_guide.en}})）。
+>
+> **SLogic32U3** 仍需要固件 S/N {{firmware.slogic32u3.min}} 或更新版本。
+
+### 修复
+
+- **USB 负载较高时，采集不再中断或出错。** 所有上位机共用的采集引擎改用较小的 USB 传输块
+  （每块约 5 ms 的数据），并始终保持多个传输同时进行。这修复了部分笔记本在高采样率下出现的
+  "acquisition stall"（有用户在 AllLogic 4ch@800 MHz 下遇到），以及 Linux 上连续快速
+  发起采集时偶发的数据缺失。如果电脑无法维持足够的传输，上位机会明确提示，而不是继续采集。
+- **AllLogic：使用 SLogic8U2 时不再反复弹出"发现新设备"。**
+- **ngscopeclient：数字波形完整显示。** 每个数字通道的最后一段，以及没有任何跳变的通道，
+  现在都会一直画到采集结束。
+
+### 改进
+
+- **支持 SLogic8U2 新固件**（USB ID `359f:3000`），所有上位机均可使用，包括 Normal、
+  USB 测试和 Emulation 三种图案模式。仍使用旧固件的设备照常可用，并显示为
+  "(old) SLogic8 U2"，提醒用户升级。
+- **所有上位机显示统一的设备名称**："(10G) SLogic32 U3"、"(5G) SLogic16 U3"、
+  "(480M) SLogic8 U2"，前缀为 USB 链路速率。
+- **ngscopeclient**
+  - 新增 **X-Y** 滤波器：以一路模拟通道为 X、另一路为 Y 作图（例如李萨如图形），支持点、
+    连线两种画法，可自动或手动设置坐标范围，余辉和点大小可调。
+  - SLogic32U3 默认以 32 通道、100 MS/s 打开；启用 ADC 通道组时，不再提供低于 100 MS/s
+    的采样率。
+  - 连接对话框按名称列出已连接的分析仪；同时连接多台时可以选择其中一台。
+- **sigrok-cli / PulseView / SLogicView：** 同时连接多台分析仪时，可用 `conn=` 选择其中一台
+  （例如 `-d sipeed-slogic-analyzer:conn=359f.3031`）。分析仪被其他程序占用时，会明确提示，
+  而不再只显示"No devices found"。
+- **SLogicView：** 停靠面板上的关闭、浮动按钮更大，更容易点击。
+
 ## v2.3.2 — 2026-10-16
 
 SLogic 2.3.2 是一个维护版本：修复 Windows 上的问题，并提高 SLogic32U3 的最低固件版本。系统要求、下载与安装方式不变，详见

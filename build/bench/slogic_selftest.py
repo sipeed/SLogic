@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SLogic16U3/32U3 cross-platform self-test over sigrok-cli.
+"""SLogic8U2/16U3/32U3 cross-platform self-test over sigrok-cli.
 
 Runs the automatable functional AND performance regression items from
 `build/docs/regression-checklist-slogic32u3.md` through a SLogic-capable
@@ -32,7 +32,7 @@ Usage:
 
 --sigrok-cli accepts a native executable, a Windows portable directory
 (containing bin/sigrok-cli.exe), or a mounted macOS .app. The device model
-(SLogic16U3 or 32U3) is auto-detected from the scan and sets the rate table.
+(SLogic8U2, 16U3 or 32U3) is auto-detected from the scan and sets the rate table.
 Plug one into the machine first. Exits non-zero if any check FAILS (or the device is missing,
 unless --allow-no-device).
 """
@@ -55,7 +55,7 @@ DRIVER = DRIVER_NAME             # "-d" argument; --conn appends ":conn=..."
 VENDOR_ID = "359f"
 # Per-model channel-mode -> max sample rate (MHz) and aggregate standard (MB/s) at the model's
 # native USB link (aggregate = channels * MHz / 8; source slogic/slogic*.c). 32U3 is USB 10G
-# (~800 MB/s; 4ch@1400 = 700), 16U3 is USB 5G (~400 MB/s). A 10G-native model negotiated down to a
+# (~800 MB/s; 4ch@1400 = 700), 16U3 is USB 5G (~400 MB/s), 8U2 is USB 2.0 HS (40 MB/s). A 10G-native model negotiated down to a
 # 5G link is capped by the 5G aggregate (half the standard): each mode runs at
 # min(native max, aggregate*8/ch) — e.g. 32U3 on 5G: 4ch@800 8ch@400 16ch@200 32ch@100.
 # "clamp" is an over-limit config (rate above the channel mode's max) the driver must clamp + warn about.
@@ -64,6 +64,8 @@ MODELS = {
                    "native": "10G", "clamp": "logic_channels=32:samplerate=1400m"},
     "SLogic16U3": {"modes": [(4, 800), (8, 400), (16, 200)], "std": 400,
                    "native": "5G", "clamp": "logic_channels=16:samplerate=400m"},
+    "SLogic8U2": {"modes": [(2, 160), (4, 80), (8, 40)], "std": 40,
+                  "native": "480M", "clamp": "logic_channels=8:samplerate=80m"},
 }
 DEFAULT_MODEL = "SLogic32U3"
 DURATION_MS = 500           # per-mode capture; long enough for the sustained-rate average to settle
@@ -414,8 +416,11 @@ def soak(capture_bytes, nch: int, mhz: int, u: int, std: int, args, spec=None):
             kv = parse_report(err.decode("utf-8", "replace") if isinstance(err, bytes) else err)
             problem = ""
             if rc != 0 or len(out) != n * u:
+                # sigrok-cli exits 0 when the driver ends a capture early, so show
+                # the core's own verdict (end=error:stall, ...) when there is one
                 tail = (err.decode("utf-8", "replace") if isinstance(err, bytes) else err).strip().splitlines()
-                problem = f"rc={rc} got {len(out)}B want {n * u}B {tail[-1][:80] if tail else ''}"
+                why = f"end={kv['end']} mbps={kv.get('mbps')}" if kv and kv.get("end") else (tail[-1][:80] if tail else "")
+                problem = f"rc={rc} got {len(out)}B want {n * u}B {why}"
             elif not kv or kv.get("end") != "ok":
                 problem = f"end={kv.get('end') if kv else 'no report'}"
             elif ring_problem(kv):
@@ -520,12 +525,12 @@ def main() -> int:
     mvp = re.search(r"VID:PID\s*=\s*([0-9a-fA-F]{4}:[0-9a-fA-F]{4})", scan_err)
     if mvp:
         info["vidpid"] = mvp.group(1).lower()
-    msn = re.search(r"S/N:\s*([A-Za-z0-9]+)", scan_out + scan_err)
+    msn = re.search(r"S/N:\s*([A-Za-z0-9.+-]+)", scan_out + scan_err)
     if msn:
         info["serial"] = msn.group(1)
-    mmod = re.search(r"SLogic\s*(\d+)\s*U3", scan_out)   # "Sipeed SLogic16 U3" / "SLogic32 U3"
+    mmod = re.search(r"SLogic\s*(\d+)\s*(U[23])", scan_out)   # "(10G) SLogic32 U3" / "(480M) SLogic8 U2"
     if mmod:
-        name = f"SLogic{mmod.group(1)}U3"
+        name = f"SLogic{mmod.group(1)}{mmod.group(2)}"
         info["model"] = name if name in MODELS else info["model"]
     scan_detail = (f"{info['model']}  VID:PID {info['vidpid']}  S/N {info['serial']}" if device_present
                    else (scan_out.strip().splitlines()[0] if scan_out.strip() else "no device found"))
@@ -534,13 +539,13 @@ def main() -> int:
 
     if not device_present:
         if not args.allow_no_device:
-            print("\nNo SLogic device found — connect a SLogic16U3/32U3 (or pass --allow-no-device).")
+            print("\nNo SLogic device found — connect a SLogic8U2/16U3/32U3 (or pass --allow-no-device).")
         return _finish(rep, info)
 
     # --- device-dependent ---
     def c_show():
         rc, out, _ = run(cli, env, ["-d", DRIVER, "--show"])
-        m = re.search(r"S/N:\s*([A-Za-z0-9]+)", out)
+        m = re.search(r"S/N:\s*([A-Za-z0-9.+-]+)", out)
         if m:
             info["serial"] = m.group(1)
         ok = rc == 0 and "samplerate" in out and ("logic_channels" in out or "Logic" in out)
@@ -714,9 +719,12 @@ def main() -> int:
     def c_head(nch, mhz):
         u = unit_of(nch)
         rc, out, _ = capture_bytes(nch, mhz, 64)
-        if rc != 0 or len(out) < 16 * u:
+        if rc != 0 or len(out) < 24 * u:
             return False, f"rc={rc} got {len(out)}B"
-        dup = out[:8 * u] == out[8 * u:16 * u]
+        # A pattern that repeats within 8 samples (2ch) makes every block equal: only a
+        # repeat that the stream then leaves is the duplicate head block.
+        a, b, c = out[:8 * u], out[8 * u:16 * u], out[16 * u:24 * u]
+        dup = a == b and b != c
         if not dup:
             return True, "head OK (no duplicate block)" + (
                 " - F1 looks fixed in this mode" if (nch, mhz) in KNOWN_FW_F1 else "")

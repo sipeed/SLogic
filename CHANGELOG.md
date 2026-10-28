@@ -8,6 +8,57 @@ requirements and installation are in the [README](README.md). A Chinese
 translation of each section is kept in [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
 and appended to the release page.
 
+## v2.3.3 — 2026-10-30
+
+SLogic 2.3.3 improves capture reliability on every platform, adds the new
+SLogic8U2 firmware, and brings an X-Y view and better ADC handling to
+ngscopeclient. System requirements, downloads and installation are
+unchanged; see the [README](https://github.com/sipeed/SLogic#readme).
+
+> [!IMPORTANT]
+> **SLogic16U3 now requires firmware S/N {{firmware.slogic16u3.min}} or newer.**
+> With this firmware the web update tool switches the analyzer into update
+> mode by itself, without the MODE button. To update, see the SLogic wiki ([English]({{firmware.slogic16u3.update_guide.en}}) · [中文]({{firmware.slogic16u3.update_guide.zh}})).
+>
+> **SLogic32U3** still requires firmware S/N {{firmware.slogic32u3.min}} or newer.
+
+### Fixes
+
+- **No more interrupted or broken captures on busy USB hosts.** The capture
+  engine shared by all applications now uses small USB transfers (about
+  5 ms of data each) and always keeps several in flight. This fixes an
+  "acquisition stall" at high sample rates on some laptops (reported with
+  AllLogic at 4 ch @ 800 MHz), and rare gaps in the data when captures were
+  started back to back on Linux. If the computer cannot keep enough
+  transfers queued, the applications now say so instead of continuing
+  silently.
+- **AllLogic: no repeated "new device" pop-ups** with the SLogic8U2.
+- **ngscopeclient: complete digital traces.** The last segment of each
+  digital channel, and channels without any edge, are now drawn to the end
+  of the capture.
+
+### Improvements
+
+- **SLogic8U2 with its new firmware** (USB ID `359f:3000`) works in every
+  application, including the Normal, USB-test and Emulation patterns.
+  Analyzers still on the old firmware keep working and are shown as
+  "(old) SLogic8 U2" as a reminder to update.
+- **The same device name everywhere:** "(10G) SLogic32 U3",
+  "(5G) SLogic16 U3", "(480M) SLogic8 U2" — the prefix is the USB link speed.
+- **ngscopeclient**
+  - New **X-Y** filter: plots one analog channel against another (for
+    example Lissajous figures), as points or connected lines, with automatic
+    or manual scaling and adjustable persistence and point size.
+  - SLogic32U3 opens at 32 channels / 100 MS/s, and while an ADC group is
+    in use, sample rates below 100 MS/s are not offered.
+  - The connect dialog lists the attached analyzers by name; with several
+    connected, you can pick one.
+- **sigrok-cli / PulseView / SLogicView:** with several analyzers connected,
+  pick one with `conn=` (for example `-d sipeed-slogic-analyzer:conn=359f.3031`).
+  An analyzer that is in use by another program is now reported as such
+  instead of "No devices found".
+- **SLogicView:** larger close and float buttons on docked panels.
+
 ## v2.3.2 — 2026-10-16
 
 SLogic 2.3.2 is a maintenance release: a fix for Windows and a new minimum
